@@ -1,0 +1,61 @@
+# Claude Code
+.claude/
+
+# Curated training data (keep README, ignore images)
+CA_Training_Data/train/
+CA_Training_Data/test/
+
+# Source datasets
+Electric Motor Thermal image Fault Diagnosis DATASET/
+Electrical Fault detection and classification/
+FLIR Thermal Images REDUCED dataset/
+Induction Motor Fault Dataset/
+Infrared Solar Modules/
+Infrared Solar Modules (1)/
+Infrared Thermal Image Dataset/
+PVC Infrared dataset for deep learning/
+Photovoltaic System O&M inspection/
+Photovoltaic system thermal inspection/
+Photovoltaic system thermography/
+Thermal Images of Induction Motor Dataset/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# ML artifacts
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.ckpt
+*.onnx
+checkpoints/
+logs/
+runs/
+wandb/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+.env.local
