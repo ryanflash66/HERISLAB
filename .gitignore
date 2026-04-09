@@ -1,23 +1,16 @@
 # Claude Code
 .claude/
 
-# Curated training data (keep README, ignore images)
-CA_Training_Data/train/
-CA_Training_Data/test/
+# Data (images and preprocessed arrays -- hosted on HuggingFace)
+data/CA_Training_Data/train/
+data/CA_Training_Data/test/
+data/CA_Preprocessed/
 
-# Source datasets
-Electric Motor Thermal image Fault Diagnosis DATASET/
-Electrical Fault detection and classification/
-FLIR Thermal Images REDUCED dataset/
-Induction Motor Fault Dataset/
-Infrared Solar Modules/
-Infrared Solar Modules (1)/
-Infrared Thermal Image Dataset/
-PVC Infrared dataset for deep learning/
-Photovoltaic System O&M inspection/
-Photovoltaic system thermal inspection/
-Photovoltaic system thermography/
-Thermal Images of Induction Motor Dataset/
+# Models (too large for GitHub)
+models/
+
+# Results (generated output)
+results/
 
 # Python
 __pycache__/
