@@ -5,6 +5,14 @@
 data/CA_Training_Data/train/
 data/CA_Training_Data/test/
 data/CA_Preprocessed/
+data/ground_truth/
+
+# Raw delivered datasets (large, not for repo)
+OneDrive_*/
+OneDrive_*.zip
+
+# PowerPoint exports (built artifact)
+docs/*.pptx
 
 # Models (too large for GitHub)
 models/

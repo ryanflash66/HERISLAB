@@ -34,6 +34,7 @@ TARGET_SIZE = (320, 240)  # width, height
 TRAIN_FOLDERS = [
     "electric_motor",
     "induction_motor",
+    "transformer",
     "pv_om_inspection",
     "pv_thermal_inspection",
 ]
@@ -41,11 +42,13 @@ TRAIN_FOLDERS = [
 TEST_NORMAL_FOLDERS = [
     "electric_motor",
     "induction_motor",
+    "transformer",
 ]
 
 TEST_FAULT_FOLDERS = [
     "electric_motor",
     "induction_motor",
+    "transformer",
 ]
 
 

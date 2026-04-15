@@ -14,12 +14,12 @@ Thermal imaging is widely used for non-destructive inspection of electrical equi
 
 | Metric | Value |
 |--------|-------|
-| AUROC | 0.909 |
-| F1 Score | 0.975 |
-| Precision | 0.952 |
+| AUROC | 0.902 |
+| F1 Score | 0.981 |
+| Precision | 0.962 |
 | Recall | 1.000 |
 
-Evaluated on 33 normal and 452 fault test images from electric motor and induction motor thermal datasets.
+Evaluated on 37 normal and 685 fault test images spanning electric motor, induction motor, and transformer thermal datasets. Recall of 1.000 means every fault in the test set was detected. The 27 false positives reflect the current F1-optimized threshold; tightening the threshold trades a small recall hit for fewer false alarms (tracked under HER-21).
 
 ## Architecture
 
@@ -41,6 +41,7 @@ Output (1x240x320) reconstructed image
 - **Loss:** Mean Squared Error (MSE)
 - **Optimizer:** Adam (lr=1e-3) with ReduceLROnPlateau scheduling
 - **Early stopping:** Patience of 10 epochs
+- **Best val loss:** 0.00583 (50 epochs, RTX 5070)
 
 ## Project Structure
 
@@ -67,18 +68,20 @@ Training data is sourced from multiple public thermal imaging datasets:
 
 | Source | Split | Count | Format |
 |--------|-------|-------|--------|
-| Electric Motor Thermal Fault Diagnosis | Train (normal) | 176 | PNG |
-| Thermal Images of Induction Motor (Noload) | Train (normal) | 25 | BMP |
+| Electric Motor Thermal Fault Diagnosis | Train (normal) | 168 | PNG |
+| Thermal Images of Induction Motor (Noload) | Train (normal) | 20 | BMP |
+| Thermal Images of Transformer (Noload) | Train (normal) | 18 | BMP |
 | Photovoltaic System O&M Inspection | Train (normal) | 7,836 | TIFF |
-| Photovoltaic System Thermal Inspection | Train (normal) | 1,062 | TIFF |
-| Electric Motor Thermal Fault Diagnosis | Test (normal/fault) | 20 / 173 | PNG |
-| Thermal Images of Induction Motor | Test (normal/fault) | 13 / 279 | BMP |
+| Photovoltaic System Thermal Inspection | Train (normal) | 1,075 | TIFF |
+| Electric Motor Thermal Fault Diagnosis | Test (normal / fault) | 28 / 173 | PNG |
+| Thermal Images of Induction Motor | Test (normal / fault) | 5 / 279 | BMP |
+| Thermal Images of Transformer | Test (normal / fault) | 4 / 233 | BMP |
 
 **Preprocessing pipeline:**
 1. Load as grayscale float32
 2. Scale to common 0-255 range (16-bit radiometric TIFFs are min-max scaled; 8-bit images pass through)
 3. Resize to 320x240 using Lanczos resampling
-4. Z-score normalize using training set global statistics (mean=171.97, std=45.68)
+4. Z-score normalize using training set global statistics (mean=171.73, std=45.97)
 
 Images and preprocessed arrays are hosted on HuggingFace and excluded from this repository via `.gitignore`.
 
