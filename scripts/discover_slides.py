@@ -8,7 +8,7 @@ from pptx import Presentation
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PPTX = ROOT / "docs" / "HERISLAB_Progress_Update.pptx"
+PPTX = ROOT / "docs" / "presentations" / "HERISLAB_Progress_Update.pptx"
 OUT = ROOT / "results" / "slide_discovery.txt"
 
 OUT.parent.mkdir(parents=True, exist_ok=True)

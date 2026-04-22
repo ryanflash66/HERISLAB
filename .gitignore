@@ -12,7 +12,7 @@ OneDrive_*/
 OneDrive_*.zip
 
 # PowerPoint exports (built artifact)
-docs/*.pptx
+docs/**/*.pptx
 
 # Models (too large for GitHub)
 models/

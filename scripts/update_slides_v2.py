@@ -14,8 +14,8 @@ from pathlib import Path
 from pptx import Presentation
 
 ROOT = Path(__file__).resolve().parent.parent
-PPTX_PATH = ROOT / "docs" / "HERISLAB_Progress_Update.pptx"
-BACKUP_PATH = ROOT / "docs" / "HERISLAB_Progress_Update.v1_backup.pptx"
+PPTX_PATH = ROOT / "docs" / "presentations" / "HERISLAB_Progress_Update.pptx"
+BACKUP_PATH = ROOT / "docs" / "presentations" / "HERISLAB_Progress_Update.v1_backup.pptx"
 
 # ---- Replacement rules ----
 # Format: (slide_idx_1based, old_text, new_text)

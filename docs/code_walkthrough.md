@@ -48,11 +48,19 @@ HERISLAB/
       test_normal.npy         <-- (33, 240, 320) float32
       test_fault.npy          <-- (452, 240, 320) float32 (after removing ambiguous)
       norm_stats.npy          <-- Saved mean and std for use in production
-  docs/                       <-- Project documents
-    Training Plan Refined.docx
-    Convolutional Autoencoder.odt
-    Dataset_Gap_Analysis.docx
-    code_walkthrough.md       <-- This file
+  docs/                                 <-- Project documents
+    code_walkthrough.md                  <-- This file (developer guide)
+    presentations/                       <-- Slide decks (pptx, gitignored)
+      HERISLAB_Progress_Update.pptx     <-- Current main deck (v2)
+      HERISLAB_Status_Update_*.pptx     <-- Per-meeting status updates
+    design/                              <-- Architecture and planning
+      Convolutional Autoencoder.odt
+      Training Plan Refined.docx
+      Dataset_Gap_Analysis.docx
+    research/                            <-- External research artifacts
+      thresholds/                        <-- Manufacturer temperature thresholds
+        transformer/                    <-- HI-105 manual + summary
+        pv/                             <-- PV module thresholds (IEC + datasheets)
   venv/                       <-- Python environment (gitignored)
   .gitignore                  <-- Keeps images and large files out of GitHub
 ```
