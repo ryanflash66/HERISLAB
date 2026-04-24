@@ -42,7 +42,10 @@ OUT_DIR = RESULTS_DIR / "demo"
 TARGET_SIZE = (320, 240)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# v2 baseline ML threshold (from results/eval_metrics.npy, F1-optimized)
+# Default model config (v2 multi-equipment). --model pv overrides these in main().
+MODEL_WEIGHTS = MODEL_DIR / "autoencoder_best.pth"
+NORM_STATS_PATH = DATA_DIR / "norm_stats.npy"
+# Default ML threshold (v2's F1-optimized cutoff from results/eval_metrics.npy)
 ML_THRESHOLD = 0.000339
 
 # Stub temperature calibration: assume the camera's 8-bit output maps linearly
@@ -81,10 +84,11 @@ THRESHOLDS = {
 # Curated demo samples — transformer-focused since that's the narrowed scope.
 # Filenames verified against the actual CA_Training_Data test folders.
 DEFAULT_SAMPLES = [
-    (TRAINING_DATA_DIR / "test" / "normal" / "transformer" / "p1010.bmp",          "transformer", "normal"),
-    (TRAINING_DATA_DIR / "test" / "fault"  / "transformer" / "p2_80_p2003.bmp",    "transformer", "fault (mild, p2)"),
-    (TRAINING_DATA_DIR / "test" / "fault"  / "transformer" / "p3_160_p3028.bmp",   "transformer", "fault (moderate, p3)"),
-    (TRAINING_DATA_DIR / "test" / "fault"  / "transformer" / "p9_600_p9086.bmp",   "transformer", "fault (severe, p9)"),
+    # 4-panel arc: NORMAL -> ML-only flag (imbalance) -> ML-only flag (mild fault) -> both flag (severe)
+    (TRAINING_DATA_DIR / "test" / "normal" / "electric_motor" / "no_fault_105.png", "transformer", "baseline motor normal"),
+    (TRAINING_DATA_DIR / "test" / "normal" / "transformer"    / "p1010.bmp",        "transformer", "transformer normal (flagged)"),
+    (TRAINING_DATA_DIR / "test" / "fault"  / "transformer"    / "p2_80_p2003.bmp",  "transformer", "fault (mild, p2)"),
+    (TRAINING_DATA_DIR / "test" / "fault"  / "transformer"    / "p9_600_p9086.bmp", "transformer", "fault (severe, p9)"),
 ]
 
 
@@ -332,20 +336,45 @@ def main():
     parser.add_argument("--equipment", type=str, default="transformer",
                         choices=["transformer", "pv"],
                         help="Equipment type for rule-based layer.")
+    parser.add_argument("--model", type=str, default="v2",
+                        choices=["v2", "pv"],
+                        help="Which autoencoder + norm stats to load. 'v2' = multi-equipment baseline, 'pv' = PV specialist.")
     parser.add_argument("--expected", type=str, default="unknown",
                         help="Expected label for the input image (cosmetic).")
     args = parser.parse_args()
 
+    # Resolve model-specific paths and threshold
+    global ML_THRESHOLD, OUT_DIR
+    if args.model == "pv":
+        pv_dir = DATA_DIR / "pv"
+        norm_stats_path = pv_dir / "norm_stats.npy"
+        weights_path = MODEL_DIR / "autoencoder_pv_best.pth"
+        pv_metrics_path = RESULTS_DIR / "pv_eval_metrics.npy"
+        if pv_metrics_path.exists():
+            pv_metrics = np.load(pv_metrics_path, allow_pickle=True).item()
+            ML_THRESHOLD = float(pv_metrics["threshold"])
+            print(f"Loaded PV threshold {ML_THRESHOLD:.6f} from eval metrics")
+        else:
+            # Fallback until evaluate_autoencoder_pv.py runs
+            ML_THRESHOLD = 0.001
+            print(f"PV eval metrics not found; using fallback threshold {ML_THRESHOLD:.6f}")
+            print(f"  (Run src/evaluate_autoencoder_pv.py after fault data lands to calibrate.)")
+        OUT_DIR = RESULTS_DIR / "demo" / "pv"
+    else:
+        norm_stats_path = NORM_STATS_PATH
+        weights_path = MODEL_WEIGHTS
+
     # Norm stats + model
-    stats = np.load(DATA_DIR / "norm_stats.npy", allow_pickle=True).item()
+    stats = np.load(norm_stats_path, allow_pickle=True).item()
     mean, std = stats["mean"], stats["std"]
     print(f"Device: {DEVICE}")
+    print(f"Model:  {args.model} ({weights_path.name})")
     print(f"Norm stats: mean={mean:.4f}, std={std:.4f}")
 
     model = ThermalAutoencoder().to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_DIR / "autoencoder_best.pth", weights_only=True))
+    model.load_state_dict(torch.load(weights_path, weights_only=True))
     model.eval()
-    print("Loaded autoencoder_best.pth\n")
+    print(f"Loaded {weights_path.name}\n")
 
     if args.image:
         path = Path(args.image)
