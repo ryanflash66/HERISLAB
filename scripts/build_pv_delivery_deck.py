@@ -405,6 +405,11 @@ def slide_performance(prs):
     add_textbox(s, 5.3, 4.7, 4.1, 0.4,
                 "97 percent of faults caught;  90 percent of normals correctly passed.",
                 font_size=10, color=MID)
+
+    # Source attribution footer
+    add_textbox(s, 0.4, 5.3, 9.2, 0.3,
+                "Evaluation faults: PVMD open dataset (Mendeley, 2024). See References slide.",
+                font_size=9, color=LIGHT, align=PP_ALIGN.CENTER)
     return s
 
 
@@ -563,6 +568,64 @@ def slide_caveats(prs):
     return s
 
 
+def slide_references(prs):
+    s = blank_slide(prs)
+    add_title(s, "References and Credits", size=26)
+    add_subtitle(s, "External data sources and standards used in this delivery")
+
+    # Left column: datasets
+    add_rect(s, 0.4, 1.3, 4.5, 3.9, fill=BG_CARD)
+    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Datasets",
+                font_size=14, bold=True, color=BLUE)
+
+    # PVMD
+    add_textbox(s, 0.6, 1.9, 4.1, 0.3, "PVMD: Photovoltaic Module Dataset",
+                font_size=11, bold=True, color=DARK)
+    add_textbox(s, 0.6, 2.2, 4.1, 0.5,
+                "Mendeley Data, 2024. 1,000 labeled fault images across cracks, hotspots, and shadings. Used as the evaluation set for this delivery.",
+                font_size=9, color=MID)
+    add_textbox(s, 0.6, 2.75, 4.1, 0.25,
+                "data.mendeley.com/datasets/5ssmfpgrpc/1",
+                font_size=8, color=ACCENT)
+
+    # PV O&M
+    add_textbox(s, 0.6, 3.15, 4.1, 0.3, "PV System O&M Inspection",
+                font_size=11, bold=True, color=DARK)
+    add_textbox(s, 0.6, 3.45, 4.1, 0.45,
+                "7,836 normal PV thermal images used in specialist training.",
+                font_size=9, color=MID)
+
+    # PV Thermal
+    add_textbox(s, 0.6, 3.95, 4.1, 0.3, "PV System Thermal Inspection",
+                font_size=11, bold=True, color=DARK)
+    add_textbox(s, 0.6, 4.25, 4.1, 0.45,
+                "1,075 normal PV thermal images used in specialist training.",
+                font_size=9, color=MID)
+
+    # Right column: standards and threshold sources
+    add_rect(s, 5.1, 1.3, 4.5, 3.9, fill=BG_CARD)
+    add_textbox(s, 5.3, 1.45, 4.1, 0.4, "Rule-layer threshold sources",
+                font_size=14, bold=True, color=BLUE)
+
+    add_textbox(s, 5.3, 1.9, 4.1, 0.3, "Standards",
+                font_size=11, bold=True, color=DARK)
+    add_bullets(s, 5.3, 2.2, 4.1, 1.6, [
+        "IEC 61215: PV module design qualification",
+        "IEC 61730: PV module safety qualification",
+        "IEC TS 63126:2025: operation at elevated temperatures",
+        "UL 61730: PV module safety standard (US)",
+    ], font_size=9)
+
+    add_textbox(s, 5.3, 3.85, 4.1, 0.3, "Manufacturer datasheets",
+                font_size=11, bold=True, color=DARK)
+    add_bullets(s, 5.3, 4.15, 4.1, 1.0, [
+        "LG NeON R, Canadian Solar HiKu, JinkoSolar Tiger Neo, "
+        "Trina Vertex, First Solar Series 6",
+    ], font_size=9)
+
+    return s
+
+
 def slide_thanks(prs):
     s = blank_slide(prs)
     bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(2.0),
@@ -598,6 +661,7 @@ def main():
         slide_inference,
         slide_demo,
         slide_caveats,
+        slide_references,
         slide_thanks,
     ]
     for i, b in enumerate(builders, 1):
