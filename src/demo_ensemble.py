@@ -23,7 +23,14 @@ HER-81 scope.
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+# Force utf-8 stdout so Unicode chars (ΔT, °C, etc.) print cleanly on Windows.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 import numpy as np
 import torch
@@ -69,27 +76,51 @@ THRESHOLDS = {
         "needs_surface_offset": True,
     },
     "pv": {
-        "type": "cell_temp",
+        # For 8-bit PV thermal imagery we can't read absolute cell °C, so the
+        # rule layer uses the hot-spot ΔT proxy (p95 - mean, scaled to ~°C).
+        # Tiers come from DAR-141's "hot-spot ΔT above mean" research.
+        "type": "hotspot_delta",
         "tiers": [
-            ("normal", 0, 60, "green"),
-            ("warning", 60, 70, "gold"),
-            ("alarm", 70, 85, "orange"),
-            ("critical", 85, 999, "red"),
+            ("normal", 0, 15, "green"),
+            ("warning", 15, 40, "gold"),
+            ("alarm", 40, 75, "orange"),
+            ("critical", 75, 999, "red"),
         ],
-        "description": "PV cell temp tiers (DAR-141 research)",
+        "description": "PV hot-spot ΔT tiers (DAR-141 research)",
         "needs_surface_offset": False,
     },
 }
 
-# Curated demo samples — transformer-focused since that's the narrowed scope.
+# Curated demo samples — transformer (v2 model) arc.
 # Filenames verified against the actual CA_Training_Data test folders.
-DEFAULT_SAMPLES = [
+DEFAULT_SAMPLES_V2 = [
     # 4-panel arc: NORMAL -> ML-only flag (imbalance) -> ML-only flag (mild fault) -> both flag (severe)
     (TRAINING_DATA_DIR / "test" / "normal" / "electric_motor" / "no_fault_105.png", "transformer", "baseline motor normal"),
     (TRAINING_DATA_DIR / "test" / "normal" / "transformer"    / "p1010.bmp",        "transformer", "transformer normal (flagged)"),
     (TRAINING_DATA_DIR / "test" / "fault"  / "transformer"    / "p2_80_p2003.bmp",  "transformer", "fault (mild, p2)"),
     (TRAINING_DATA_DIR / "test" / "fault"  / "transformer"    / "p9_600_p9086.bmp", "transformer", "fault (severe, p9)"),
 ]
+
+# Curated demo samples — PV specialist arc.
+# Selected by error ranking against the PV specialist (epoch 5, val_loss 0.017):
+#   [1] holdout normal, lowest error  ............. confident NORMAL
+#   [2] holdout normal, just under threshold  ..... borderline NORMAL
+#   [3] PVMD hotspot, error just above threshold .. subtle FAULT (ML only)
+#   [4] PVMD crack, highest error in dataset  ..... severe FAULT (both layers)
+DEFAULT_SAMPLES_PV = [
+    (TRAINING_DATA_DIR / "train" / "normal" / "pv_om_inspection"      / "sr_frame_002784.tiff", "pv", "normal (confident)"),
+    (TRAINING_DATA_DIR / "train" / "normal" / "pv_thermal_inspection" / "THM_00078_01017.tif",  "pv", "normal (borderline)"),
+    (TRAINING_DATA_DIR / "test"  / "fault"  / "pv" / "H237.jpeg", "pv", "fault (mild hotspot)"),
+    (TRAINING_DATA_DIR / "test"  / "fault"  / "pv" / "C144.jpeg", "pv", "fault (severe crack)"),
+]
+
+DEFAULT_SAMPLES_BY_MODEL = {
+    "v2": DEFAULT_SAMPLES_V2,
+    "pv": DEFAULT_SAMPLES_PV,
+}
+
+# Back-compat alias; rebound in main() based on --model.
+DEFAULT_SAMPLES = DEFAULT_SAMPLES_V2
 
 
 # --- Preprocessing (mirrors preprocess.py / generate_heatmaps.py) ---
@@ -134,39 +165,67 @@ def ml_verdict(mean_err):
 
 # --- Rule path ---
 
-def estimate_surface_temp(raw_0_255):
-    """STUB: map 8-bit pixel value to plausible surface °C.
+def estimate_rule_signal(raw_0_255, equipment):
+    """Compute the primary rule-layer signal for the given equipment type.
 
-    Real radiometric calibration is HER-81. For the demo, assume a linear
-    map across the camera's operational range.
+    Returns (signal_c, display_bits) where `signal_c` is the °C-ish value the
+    rule tiers compare against, and `display_bits` is a dict of extra fields
+    the decision panel can show (max pixel, p95, mean, etc.).
+
+    Real radiometric calibration (per-pixel °C from a manufacturer-specific
+    camera calibration) is HER-81 territory. The mappings here are stubs
+    sized to produce usable demo signals from 8-bit imagery.
     """
     max_pixel = float(raw_0_255.max())
-    # Linear map: pixel 0 -> CAMERA_TEMP_MIN, pixel 255 -> CAMERA_TEMP_MAX
-    surface_c = CAMERA_TEMP_MIN + (max_pixel / 255.0) * (CAMERA_TEMP_MAX - CAMERA_TEMP_MIN)
-    return surface_c, max_pixel
+
+    if equipment == "transformer":
+        # Transformer: linear map pixel -> absolute surface °C; max pixel
+        # represents the hottest visible region on the tank.
+        surface_c = CAMERA_TEMP_MIN + (max_pixel / 255.0) * (CAMERA_TEMP_MAX - CAMERA_TEMP_MIN)
+        return surface_c, {
+            "label": "Surface proxy",
+            "value_str": f"{surface_c:.1f}°C",
+            "extra": f"Max pixel: {max_pixel:.0f} / 255",
+        }
+
+    if equipment == "pv":
+        # PV panels run hot and uniformly, so max-pixel alone is a bad signal.
+        # Instead use p95 - mean as a hot-spot ΔT proxy scaled into the
+        # DAR-141 hot-spot ΔT tier range (0-100-ish "°C").
+        p95 = float(np.percentile(raw_0_255, 95))
+        mean_pixel = float(raw_0_255.mean())
+        delta_c = (p95 - mean_pixel) * (100.0 / 255.0)
+        return delta_c, {
+            "label": "Hot-spot ΔT proxy",
+            "value_str": f"{delta_c:.1f}°C (p95 − mean scaled)",
+            "extra": f"p95 pixel: {p95:.0f}, mean pixel: {mean_pixel:.0f}",
+        }
+
+    return 0.0, {"label": "Unknown", "value_str": "n/a", "extra": ""}
 
 
-def rule_verdict(surface_c, equipment):
+def rule_verdict(signal_c, equipment):
     """Apply per-equipment rule-based thresholds. Returns (severity, explanation)."""
     cfg = THRESHOLDS[equipment]
     if equipment == "transformer":
-        calibrated_c = surface_c + TRANSFORMER_SURFACE_OFFSET_C if cfg["needs_surface_offset"] else surface_c
+        calibrated_c = signal_c + TRANSFORMER_SURFACE_OFFSET_C if cfg["needs_surface_offset"] else signal_c
         ceiling = cfg["ceiling_c"]
         if calibrated_c > ceiling:
             return "CRITICAL", (
-                f"Estimated top-oil = surface {surface_c:.1f}°C + 10°C offset = {calibrated_c:.1f}°C "
+                f"Estimated top-oil = surface {signal_c:.1f}°C + 10°C offset = {calibrated_c:.1f}°C "
                 f"exceeds ceiling {ceiling:.0f}°C"
             )
         return "PASS", (
-            f"Estimated top-oil = surface {surface_c:.1f}°C + 10°C offset = {calibrated_c:.1f}°C "
+            f"Estimated top-oil = surface {signal_c:.1f}°C + 10°C offset = {calibrated_c:.1f}°C "
             f"within ceiling {ceiling:.0f}°C"
         )
     elif equipment == "pv":
-        calibrated_c = surface_c
         for name, lo, hi, _color in cfg["tiers"]:
-            if lo <= calibrated_c < hi:
-                return name.upper(), f"Cell temp {calibrated_c:.1f}°C falls in '{name}' tier [{lo}-{hi}°C)"
-        return "OUT_OF_RANGE", f"Cell temp {calibrated_c:.1f}°C outside all tiers"
+            if lo <= signal_c < hi:
+                return name.upper(), (
+                    f"Hot-spot ΔT proxy {signal_c:.1f}°C falls in '{name}' tier [{lo}-{hi}°C)"
+                )
+        return "OUT_OF_RANGE", f"Hot-spot ΔT proxy {signal_c:.1f}°C outside all tiers"
     return "UNKNOWN", "No rule for this equipment type"
 
 
@@ -197,7 +256,7 @@ def ensemble_decision(ml, rule):
 # --- Visualization ---
 
 def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
-                 ml, ml_reason, surface_c, max_pixel, rule, rule_reason,
+                 ml, ml_reason, signal_display, rule, rule_reason,
                  final, final_color, out_path, title_suffix=""):
     fig = plt.figure(figsize=(16, 4.2))
     gs = fig.add_gridspec(1, 5, width_ratios=[1, 1, 1, 1, 1.6], wspace=0.18)
@@ -253,8 +312,8 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
         ("", "black", "normal"),
         ("─── Rule-Based Layer ───", "#e67e22", "bold"),
         (f"  Verdict: {rule}", rule_color, "bold"),
-        (f"  Max pixel: {max_pixel:.0f} / 255", "grey", "normal"),
-        (f"  Surface proxy: {surface_c:.1f}°C", "black", "normal"),
+        (f"  {signal_display['extra']}", "grey", "normal"),
+        (f"  {signal_display['label']}: {signal_display['value_str']}", "black", "normal"),
         (f"  {rule_reason}", "grey", "normal"),
         ("", "black", "normal"),
         ("─── Ensemble Decision ───", "#1f4e79", "bold"),
@@ -309,8 +368,8 @@ def run_one(path, equipment, expected, model, mean, std, idx):
     recon_denorm = recon_normed * std + mean
 
     ml, ml_reason = ml_verdict(mean_err)
-    surface_c, max_pixel = estimate_surface_temp(raw)
-    rule, rule_reason = rule_verdict(surface_c, equipment)
+    signal_c, signal_display = estimate_rule_signal(raw, equipment)
+    rule, rule_reason = rule_verdict(signal_c, equipment)
     final, final_color = ensemble_decision(ml, rule)
 
     # Console output
@@ -322,7 +381,7 @@ def run_one(path, equipment, expected, model, mean, std, idx):
     out_path = OUT_DIR / f"demo_{idx:02d}_{equipment}_{expected}_{path.stem}.png"
     render_panel(
         path, equipment, raw, recon_denorm, err, mean_err,
-        ml, ml_reason, surface_c, max_pixel, rule, rule_reason,
+        ml, ml_reason, signal_display, rule, rule_reason,
         final, final_color, out_path,
         title_suffix=f"expected {expected}",
     )
@@ -343,8 +402,9 @@ def main():
                         help="Expected label for the input image (cosmetic).")
     args = parser.parse_args()
 
-    # Resolve model-specific paths and threshold
-    global ML_THRESHOLD, OUT_DIR
+    # Resolve model-specific paths, threshold, and curated sample set
+    global ML_THRESHOLD, OUT_DIR, DEFAULT_SAMPLES
+    DEFAULT_SAMPLES = DEFAULT_SAMPLES_BY_MODEL[args.model]
     if args.model == "pv":
         pv_dir = DATA_DIR / "pv"
         norm_stats_path = pv_dir / "norm_stats.npy"
