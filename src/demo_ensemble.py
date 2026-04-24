@@ -123,6 +123,27 @@ DEFAULT_SAMPLES_BY_MODEL = {
 DEFAULT_SAMPLES = DEFAULT_SAMPLES_V2
 
 
+# --- Display helpers ---
+
+def load_original_for_display(path):
+    """Load the image in its original form for human-viewable display.
+
+    Returns (array, mode):
+      - ("rgb", (H, W, 3) uint8) if the file was stored with color (e.g. JPEG
+        with a thermal palette baked in).
+      - ("mono", (H, W) float) if single-channel (raw radiometric data).
+        Caller should render with a thermal colormap.
+    """
+    img = Image.open(path)
+    arr = np.array(img)
+    if arr.ndim == 3:
+        # RGB or RGBA — drop alpha if present, return as uint8 RGB
+        if arr.shape[-1] == 4:
+            arr = arr[..., :3]
+        return arr, "rgb"
+    return arr.astype(np.float32), "mono"
+
+
 # --- Preprocessing (mirrors preprocess.py / generate_heatmaps.py) ---
 
 def load_image_for_inference(path, mean, std):
@@ -258,25 +279,47 @@ def ensemble_decision(ml, rule):
 def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
                  ml, ml_reason, signal_display, rule, rule_reason,
                  final, final_color, out_path, title_suffix=""):
-    fig = plt.figure(figsize=(16, 4.2))
-    gs = fig.add_gridspec(1, 5, width_ratios=[1, 1, 1, 1, 1.6], wspace=0.18)
+    fig = plt.figure(figsize=(18, 4.2))
+    gs = fig.add_gridspec(1, 6, width_ratios=[1, 1, 1, 1, 1, 1.8], wspace=0.18)
 
-    ax0 = fig.add_subplot(gs[0, 0])
+    # Panel 0: thermal view (original color if RGB, else thermal colormap)
+    ax_thermal = fig.add_subplot(gs[0, 0])
+    orig_arr, orig_mode = load_original_for_display(path)
+    if orig_mode == "rgb":
+        ax_thermal.imshow(orig_arr)
+        title = "Thermal (camera view)"
+    else:
+        # Apply a thermal colormap so the human viewer can see heat structure
+        mn, mx = float(orig_arr.min()), float(orig_arr.max())
+        if mx > mn:
+            normed = (orig_arr - mn) / (mx - mn)
+        else:
+            normed = np.zeros_like(orig_arr)
+        ax_thermal.imshow(normed, cmap="inferno")
+        title = "Thermal (color-mapped)"
+    ax_thermal.set_title(title, fontsize=10, fontweight="bold")
+    ax_thermal.axis("off")
+
+    # Panel 1: model input (grayscale, after preprocessing)
+    ax0 = fig.add_subplot(gs[0, 1])
     ax0.imshow(raw, cmap="gray", vmin=0, vmax=255)
-    ax0.set_title("Original", fontsize=10, fontweight="bold")
+    ax0.set_title("Model input", fontsize=10, fontweight="bold")
     ax0.axis("off")
 
-    ax1 = fig.add_subplot(gs[0, 1])
+    # Panel 2: reconstruction
+    ax1 = fig.add_subplot(gs[0, 2])
     ax1.imshow(recon_denorm, cmap="gray", vmin=0, vmax=255)
     ax1.set_title("Reconstruction", fontsize=10, fontweight="bold")
     ax1.axis("off")
 
-    ax2 = fig.add_subplot(gs[0, 2])
+    # Panel 3: per-pixel error
+    ax2 = fig.add_subplot(gs[0, 3])
     ax2.imshow(err, cmap="hot")
     ax2.set_title("Per-pixel error", fontsize=10, fontweight="bold")
     ax2.axis("off")
 
-    ax3 = fig.add_subplot(gs[0, 3])
+    # Panel 4: overlay
+    ax3 = fig.add_subplot(gs[0, 4])
     ax3.imshow(raw, cmap="gray", vmin=0, vmax=255)
     em = err
     em_max = em.max() if em.max() > 0 else 1.0
@@ -288,8 +331,8 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
     ax3.set_title("Overlay", fontsize=10, fontweight="bold")
     ax3.axis("off")
 
-    # Decision panel
-    ax4 = fig.add_subplot(gs[0, 4])
+    # Panel 5: Decision text
+    ax4 = fig.add_subplot(gs[0, 5])
     ax4.axis("off")
 
     ml_color = "red" if ml == "FAULT" else "green"
