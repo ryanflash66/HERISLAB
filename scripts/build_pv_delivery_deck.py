@@ -199,51 +199,51 @@ def slide_title(prs):
 
 def slide_shipped(prs):
     s = blank_slide(prs)
-    add_title(s, "What We Shipped")
-    add_subtitle(s, "A working PV anomaly detection pipeline, end to end")
+    add_title(s, "What We Built")
+    add_subtitle(s, "A working PV fault detection pipeline, from image to decision")
 
     # Four cards
     card_y = 1.4
     card_h = 3.6
     cards = [
         {
-            "title": "Specialist Model",
+            "title": "PV-Only Model",
             "header_color": BLUE,
             "body": [
-                "Autoencoder trained on PV-only data",
+                "Trained only on PV panel images",
                 "8,019 training images",
-                "10.5 minutes on the RTX 5070",
-                "2.35 million parameters",
+                "Trained in 10.5 minutes on our GPU",
+                "Separate from the earlier all-equipment model",
             ],
         },
         {
-            "title": "Ensemble Pipeline",
+            "title": "Two-Layer Decision",
             "header_color": ACCENT,
             "body": [
-                "Two-layer decision:",
-                "  ML reconstruction error",
-                "  Rule-based temperature check",
-                "Combined verdict plus explanation",
+                "The model's anomaly check",
+                "A temperature-based rule check",
+                "Combined answer with an explanation",
+                "Either layer can flag a problem",
             ],
         },
         {
-            "title": "Evaluation",
+            "title": "Tested on Real Data",
             "header_color": GREEN,
             "body": [
-                "Held out 892 real normals",
-                "Tested on 1,000 real faults",
-                "Faults sourced from PVMD",
-                "(open research dataset)",
+                "892 healthy panels held back for testing",
+                "1,000 real fault images from an open dataset",
+                "Faults include cracks, hot spots, and shading",
+                "Model had never seen any of them",
             ],
         },
         {
             "title": "Live Demo",
             "header_color": ORANGE,
             "body": [
-                "One command, end to end",
-                "4 curated images",
-                "5-panel visual explanation",
-                "Also runs on any single image",
+                "One command runs the whole pipeline",
+                "Shows 4 example images",
+                "Produces a clear visual per image",
+                "Can also run on any single image",
             ],
         },
     ]
@@ -263,7 +263,7 @@ def slide_shipped(prs):
 def slide_architecture(prs):
     s = blank_slide(prs)
     add_title(s, "Architecture: Ensemble Pipeline")
-    add_subtitle(s, "ML catches novel patterns; rules catch hard limits. Complementary by design.")
+    add_subtitle(s, "The model catches unusual patterns; the rules catch clear temperature limits. They cover each other.")
 
     # Flow diagram (horizontal)
     box_h = 0.75
@@ -282,16 +282,16 @@ def slide_architecture(prs):
 
     # ML path (top)
     add_rect(s, 2.3, 1.05, 2.2, 0.6, fill=GREEN)
-    add_textbox(s, 2.3, 1.15, 2.2, 0.4, "ML Layer",
+    add_textbox(s, 2.3, 1.15, 2.2, 0.4, "Model Check",
                 font_size=12, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-    add_textbox(s, 2.3, 1.75, 2.2, 0.35, "Autoencoder reconstruction error",
+    add_textbox(s, 2.3, 1.75, 2.2, 0.35, "How well it can rebuild the image",
                 font_size=9, color=DARK, align=PP_ALIGN.CENTER)
 
     # Rules path (bottom)
     add_rect(s, 2.3, 2.35, 2.2, 0.6, fill=ORANGE)
-    add_textbox(s, 2.3, 2.45, 2.2, 0.4, "Rule Layer",
+    add_textbox(s, 2.3, 2.45, 2.2, 0.4, "Temperature Rule",
                 font_size=12, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-    add_textbox(s, 2.3, 3.05, 2.2, 0.35, "Temperature vs. threshold tiers",
+    add_textbox(s, 2.3, 3.05, 2.2, 0.35, "Is any spot too hot vs limits",
                 font_size=9, color=DARK, align=PP_ALIGN.CENTER)
 
     # Arrows in
@@ -319,37 +319,37 @@ def slide_architecture(prs):
     add_rect(s, 0.4, 3.7, 9.2, 1.7, fill=BG_CARD)
     add_textbox(s, 0.6, 3.85, 9.0, 0.4, "Why both layers",
                 font_size=14, bold=True, color=BLUE)
-    add_textbox(s, 0.6, 4.25, 4.4, 0.3, "ML catches:",
+    add_textbox(s, 0.6, 4.25, 4.4, 0.3, "The model catches:",
                 font_size=11, bold=True, color=GREEN)
     add_bullets(s, 0.6, 4.5, 4.4, 0.9, [
-        "Novel failure modes (cracks, microstructure damage)",
-        "Spatial pattern anomalies",
-        "Early degradation before hard thresholds trigger",
+        "Unusual visual patterns (cracks, damage, shading)",
+        "Problems the rules might not have a number for",
+        "Early warning signs before anything gets really hot",
     ], font_size=9)
-    add_textbox(s, 5.1, 4.25, 4.4, 0.3, "Rules catch:",
+    add_textbox(s, 5.1, 4.25, 4.4, 0.3, "The rules catch:",
                 font_size=11, bold=True, color=ORANGE)
     add_bullets(s, 5.1, 4.5, 4.4, 0.9, [
-        "Known failure modes with defined limits",
-        "Auditable, regulator-friendly decisions",
-        "Safety-critical hard ceilings",
+        "Clear overheat cases with known temperature limits",
+        "Easy-to-explain decisions for a technician or auditor",
+        "Hard safety limits that should never be crossed",
     ], font_size=9)
     return s
 
 
 def slide_performance(prs):
     s = blank_slide(prs)
-    add_title(s, "Performance")
-    add_subtitle(s, "Evaluated on 892 holdout normals + 1,000 real faults")
+    add_title(s, "How Well It Works")
+    add_subtitle(s, "Tested on 892 healthy panels set aside for testing plus 1,000 real fault images")
 
     # Left: metrics comparison table
     add_rect(s, 0.4, 1.3, 4.5, 3.9, fill=BG_CARD)
-    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Metrics (PV specialist)",
+    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Scores (PV-only model)",
                 font_size=15, bold=True, color=BLUE)
 
     # Header row
     add_textbox(s, 0.7, 2.0, 1.6, 0.3, "Metric", font_size=11, bold=True, color=DARK)
-    add_textbox(s, 2.3, 2.0, 1.3, 0.3, "v2 baseline", font_size=11, bold=True, color=MID, align=PP_ALIGN.CENTER)
-    add_textbox(s, 3.6, 2.0, 1.3, 0.3, "PV specialist", font_size=11, bold=True, color=BLUE, align=PP_ALIGN.CENTER)
+    add_textbox(s, 2.3, 2.0, 1.3, 0.3, "Old model", font_size=11, bold=True, color=MID, align=PP_ALIGN.CENTER)
+    add_textbox(s, 3.6, 2.0, 1.3, 0.3, "PV-only model", font_size=11, bold=True, color=BLUE, align=PP_ALIGN.CENTER)
 
     rows = [
         ("AUROC", "0.9023", "0.9736", GREEN),
@@ -365,15 +365,15 @@ def slide_performance(prs):
         y += 0.4
 
     add_textbox(s, 0.6, 4.25, 4.1, 0.9,
-                "Fault mean reconstruction error: 0.147;  normal mean: 0.015. "
-                "Clean bimodal separation (about 10x gap).",
+                "Healthy panels produce low error (0.015 average). Faulty panels produce "
+                "much higher error (0.147 average). About a 10x gap between the two groups.",
                 font_size=10, color=MID)
 
     # Right: confusion matrix
     add_rect(s, 5.1, 1.3, 4.5, 3.9, fill=BG_CARD)
     add_textbox(s, 5.3, 1.45, 4.1, 0.4, "Confusion matrix",
                 font_size=15, bold=True, color=BLUE)
-    add_textbox(s, 5.3, 1.85, 4.1, 0.3, "At F1-optimal threshold 0.028",
+    add_textbox(s, 5.3, 1.85, 4.1, 0.3, "Using the best threshold for balanced accuracy (0.028)",
                 font_size=10, color=MID)
 
     # 2x2 grid
@@ -408,96 +408,96 @@ def slide_performance(prs):
 
     # Source attribution footer
     add_textbox(s, 0.4, 5.3, 9.2, 0.3,
-                "Evaluation faults: PVMD open dataset (Mendeley, 2024). See References slide.",
+                "Test faults: PVMD open dataset (Mendeley, 2024). See References slide.",
                 font_size=9, color=LIGHT, align=PP_ALIGN.CENTER)
     return s
 
 
 def slide_inference(prs):
     s = blank_slide(prs)
-    add_title(s, "The Inference Flow")
-    add_subtitle(s, "8 steps, per image, from file to decision")
+    add_title(s, "How Each Image Is Processed")
+    add_subtitle(s, "The steps the code runs, per image, from file to final answer")
 
-    # Left: numbered steps 1-4
+    # Left: numbered steps 1-5 (prep + model)
     add_rect(s, 0.4, 1.3, 4.5, 3.9, fill=BG_CARD)
-    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Preprocess + Inference",
+    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Prepare the image",
                 font_size=14, bold=True, color=BLUE)
     add_numbered(s, 0.6, 1.95, 4.1, 3.1, [
-        "Acquire image from camera or file",
-        "Collapse color channels to grayscale",
-        "Scale pixel values to 0 to 255 range",
-        "Resize to 320 by 240 and z-score normalize",
-        "Forward pass through autoencoder",
+        "Load the image (from camera or file)",
+        "Strip color: keep only brightness per pixel",
+        "Standardize the brightness range to 0 to 255",
+        "Resize to the model's expected size; balance the numbers",
+        "Run the image through the model",
     ], font_size=11)
 
-    # Right: steps 5-8
+    # Right: steps 6-9 (decision)
     add_rect(s, 5.1, 1.3, 4.5, 3.9, fill=BG_CARD)
-    add_textbox(s, 5.3, 1.45, 4.1, 0.4, "Decision",
+    add_textbox(s, 5.3, 1.45, 4.1, 0.4, "Make the decision",
                 font_size=14, bold=True, color=BLUE)
     add_numbered(s, 5.3, 1.95, 4.1, 3.1, [
-        "Compute reconstruction MSE",
-        "ML verdict: MSE vs. threshold (0.028)",
-        "Rule verdict: hot-spot delta T tier lookup",
-        "Ensemble: combine both into final decision",
+        "Measure how well the model rebuilt the image",
+        "Model answer: high error means fault (vs. a calibrated cutoff)",
+        "Rule answer: does any spot exceed temperature limits?",
+        "Combine both answers into a final verdict",
     ], font_size=11)
 
     # Bottom note
     add_textbox(s, 0.4, 5.25, 9.2, 0.3,
-                "Fractional second per image on GPU. The demo script wraps this in a for-loop over curated samples plus a matplotlib renderer.",
+                "Under a second per image on our GPU. The demo runs this on 4 samples and draws a picture showing each step.",
                 font_size=10, color=MID, align=PP_ALIGN.CENTER)
     return s
 
 
 def slide_demo(prs):
     s = blank_slide(prs)
-    add_title(s, "Live Demo: 4-Panel Arc")
-    add_subtitle(s, "Narrative showing ML + rules complementing each other")
+    add_title(s, "Live Demo: 4 Example Images")
+    add_subtitle(s, "Each one shows what the model and rules each say, and how they combine")
 
     # Four cards, one per panel
     cards = [
         {
             "tag": "[1]",
-            "title": "Normal (confident)",
+            "title": "Healthy panel",
             "ml": "NORMAL",
             "ml_color": GREEN,
             "rule": "NORMAL",
             "rule_color": GREEN,
             "ensemble": "NORMAL",
             "ensemble_color": GREEN,
-            "note": "Both layers agree: healthy panel",
+            "note": "Both layers agree: nothing wrong",
         },
         {
             "tag": "[2]",
-            "title": "Normal (borderline)",
+            "title": "Healthy but unusual",
             "ml": "FAULT",
             "ml_color": RED,
             "rule": "NORMAL",
             "rule_color": GREEN,
-            "ensemble": "ML only",
+            "ensemble": "Flagged by model",
             "ensemble_color": ORANGE,
-            "note": "Worth a technician look before any crew dispatch",
+            "note": "Model noticed something odd; would send for a check before any crew is dispatched",
         },
         {
             "tag": "[3]",
-            "title": "Fault (mild hotspot)",
+            "title": "Mild hot spot",
             "ml": "FAULT",
             "ml_color": RED,
             "rule": "WARNING",
             "rule_color": ORANGE,
-            "ensemble": "Both layers",
+            "ensemble": "Both agree",
             "ensemble_color": RED,
-            "note": "Both catch it: high-confidence fault",
+            "note": "Both layers flag: high-confidence fault",
         },
         {
             "tag": "[4]",
-            "title": "Fault (severe crack)",
+            "title": "Severe crack",
             "ml": "FAULT",
             "ml_color": RED,
             "rule": "WARNING",
             "rule_color": ORANGE,
-            "ensemble": "ML dominates",
+            "ensemble": "Model catches it",
             "ensemble_color": RED,
-            "note": "Cracks are dim, not hot: ML catches what rules miss",
+            "note": "Cracks look dim, not hot, so the rules alone would miss this. The model catches it.",
         },
     ]
 
@@ -537,33 +537,36 @@ def slide_demo(prs):
 
 def slide_caveats(prs):
     s = blank_slide(prs)
-    add_title(s, "Caveats and What's Next")
-    add_subtitle(s, "Honest about where the demo is a stub; clear about the path to production")
+    add_title(s, "What's Rough + What's Next")
+    add_subtitle(s, "Honest about shortcuts taken today and what's immediately next")
 
-    # Left: caveats (orange)
+    # Left: rough edges (orange)
     add_rect(s, 0.4, 1.3, 4.5, 3.9, fill=BG_ASK, line=ORANGE)
-    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Known stubs",
+    add_textbox(s, 0.6, 1.45, 4.1, 0.4, "Rough edges to fix",
                 font_size=15, bold=True, color=ORANGE)
     add_bullets(s, 0.6, 1.9, 4.1, 3.1, [
-        "Rule layer uses a hot-spot delta T proxy (p95 minus mean pixel). "
-        "Works for the demo; not a real Celsius reading.",
-        "Open dataset ships as 8-bit JPEG without per-pixel temperature. "
-        "Production would use radiometric TIFF from the deployed camera.",
-        "Equipment type (transformer vs. PV) is selected manually per call. "
-        "Production needs an upstream classifier or routing layer.",
-        "No production inference API yet. Script runs locally for now.",
+        "The temperature rule uses an estimate, not real degrees. The open "
+        "dataset we used doesn't include real temperature readings. A real "
+        "deployment camera provides them directly.",
+        "You have to tell the system what equipment the image is (PV or "
+        "transformer). A real deployment would detect that automatically.",
+        "There's no web service yet. The demo runs on a laptop. A real "
+        "deployment needs a server behind an API.",
     ], font_size=10)
 
-    # Right: next steps (blue/green)
+    # Right: next up (green) — ordered by critical path
     add_rect(s, 5.1, 1.3, 4.5, 3.9, fill=BG_CARD)
-    add_textbox(s, 5.3, 1.45, 4.1, 0.4, "Next up",
+    add_textbox(s, 5.3, 1.45, 4.1, 0.4, "Next up (in order)",
                 font_size=15, bold=True, color=GREEN)
     add_bullets(s, 5.3, 1.9, 4.1, 3.1, [
-        "Transformer specialist model (pending more transformer data)",
-        "Real radiometric calibration from deployed thermal camera",
-        "Augmentation pipeline for data-scarce equipment types",
-        "Threshold tuning for deployment priorities (missed faults vs. false alarms)",
-        "Inference API and equipment-type routing",
+        "Build the data augmentation pipeline. Still pending from last "
+        "round. The transformer model has only 18 training images and "
+        "can't train without this.",
+        "Keep sourcing more transformer images (Matias leading).",
+        "Train the transformer-only model once the above two are ready.",
+        "Tune the alert cutoff based on whether the utility prefers "
+        "'catch everything' or 'don't cry wolf'.",
+        "Wrap the pipeline in a web service for real-time use.",
     ], font_size=10)
     return s
 
@@ -582,7 +585,7 @@ def slide_references(prs):
     add_textbox(s, 0.6, 1.9, 4.1, 0.3, "PVMD: Photovoltaic Module Dataset",
                 font_size=11, bold=True, color=DARK)
     add_textbox(s, 0.6, 2.2, 4.1, 0.5,
-                "Mendeley Data, 2024. 1,000 labeled fault images across cracks, hotspots, and shadings. Used as the evaluation set for this delivery.",
+                "Mendeley Data, 2024. 1,000 labeled fault images (cracks, hot spots, and shadings). Used to test this model.",
                 font_size=9, color=MID)
     add_textbox(s, 0.6, 2.75, 4.1, 0.25,
                 "data.mendeley.com/datasets/5ssmfpgrpc/1",
@@ -592,14 +595,14 @@ def slide_references(prs):
     add_textbox(s, 0.6, 3.15, 4.1, 0.3, "PV System O&M Inspection",
                 font_size=11, bold=True, color=DARK)
     add_textbox(s, 0.6, 3.45, 4.1, 0.45,
-                "7,836 normal PV thermal images used in specialist training.",
+                "7,836 healthy PV thermal images used to train the model.",
                 font_size=9, color=MID)
 
     # PV Thermal
     add_textbox(s, 0.6, 3.95, 4.1, 0.3, "PV System Thermal Inspection",
                 font_size=11, bold=True, color=DARK)
     add_textbox(s, 0.6, 4.25, 4.1, 0.45,
-                "1,075 normal PV thermal images used in specialist training.",
+                "1,075 healthy PV thermal images used to train the model.",
                 font_size=9, color=MID)
 
     # Right column: standards and threshold sources
