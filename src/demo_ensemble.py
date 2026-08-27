@@ -16,6 +16,14 @@ Usage:
 
   venv/Scripts/python.exe src/demo_ensemble.py --image <path> --equipment transformer|pv
 
+  venv/Scripts/python.exe src/demo_ensemble.py --thresholds config/scada_greenville.json
+      --> same pipeline, utility-specific setpoints instead of the IEC defaults
+
+Rule-layer thresholds live in JSON, not in this file. The defaults ship at
+config/thresholds_iec.json; --thresholds points at any file with the same
+shape. See load_threshold_config() for the schema and RULE_TYPES for the
+supported rule types.
+
 NOTE: this is a STUB, not HER-81's production implementation. The "temperature
 extraction" step assumes a linear map from 8-bit pixel values to a plausible
 camera operating range (20-120°C) — real radiometric-to-°C calibration is
@@ -23,6 +31,7 @@ HER-81 scope.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -47,7 +56,9 @@ MODEL_DIR = ROOT / "models"
 RESULTS_DIR = ROOT / "results"
 OUT_DIR = RESULTS_DIR / "demo"
 TARGET_SIZE = (320, 240)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
+
 
 # Default model config (v2 multi-equipment). --model pv overrides these in main().
 MODEL_WEIGHTS = MODEL_DIR / "autoencoder_best.pth"
@@ -55,41 +66,9 @@ NORM_STATS_PATH = DATA_DIR / "norm_stats.npy"
 # Default ML threshold (v2's F1-optimized cutoff from results/eval_metrics.npy)
 ML_THRESHOLD = 0.000339
 
-# Stub temperature calibration: assume the camera's 8-bit output maps linearly
-# from its operational min to max. These are plausible inspection defaults, not
-# per-image calibrations. Real radiometric extraction is HER-81.
-CAMERA_TEMP_MIN = 20.0
-CAMERA_TEMP_MAX = 120.0
-
-# Tank-surface -> top-oil calibration offset (IEEE C57.91 literature, conservative)
-TRANSFORMER_SURFACE_OFFSET_C = 10.0
-
-# Ambient temperature default (Greenville summer estimate)
-AMBIENT_C = 35.0
-
-# Per-equipment thresholds — v1 config (HER-79 research + DAR-141)
-THRESHOLDS = {
-    "transformer": {
-        "type": "top_oil",
-        "ceiling_c": AMBIENT_C + 85.0,  # 120°C for Greenville summer
-        "description": "Top-oil ceiling: ambient + 85°C (HI-105 §6)",
-        "needs_surface_offset": True,
-    },
-    "pv": {
-        # For 8-bit PV thermal imagery we can't read absolute cell °C, so the
-        # rule layer uses the hot-spot ΔT proxy (p95 - mean, scaled to ~°C).
-        # Tiers come from DAR-141's "hot-spot ΔT above mean" research.
-        "type": "hotspot_delta",
-        "tiers": [
-            ("normal", 0, 15, "green"),
-            ("warning", 15, 40, "gold"),
-            ("alarm", 40, 75, "orange"),
-            ("critical", 75, 999, "red"),
-        ],
-        "description": "PV hot-spot ΔT tiers (DAR-141 research)",
-        "needs_surface_offset": False,
-    },
-}
+# Rule-layer thresholds (camera calibration, ambient, per-equipment setpoints)
+# live here. Swap in utility SCADA setpoints with --thresholds <path>.
+DEFAULT_THRESHOLD_CONFIG = ROOT / "config" / "thresholds_iec.json"
 
 # Curated demo samples — transformer (v2 model) arc.
 # Filenames verified against the actual CA_Training_Data test folders.
@@ -184,70 +163,321 @@ def ml_verdict(mean_err):
     return "NORMAL", f"MSE {mean_err:.6f} ≤ threshold {ML_THRESHOLD:.6f}"
 
 
-# --- Rule path ---
+# --- Rule path: severity vocabulary ---
 
-def estimate_rule_signal(raw_0_255, equipment):
+# Every severity a rule type can emit is declared here once. `action` drives
+# the ensemble decision, `color` drives the decision panel. A severity that
+# isn't in this table is an error, not a silent pass — see severity_entry().
+SEVERITY_REGISTRY = {
+    "PASS":     {"action": "pass",    "color": "green"},
+    "NORMAL":   {"action": "pass",    "color": "green"},
+    "WARNING":  {"action": "monitor", "color": "gold"},
+    "ALARM":    {"action": "flag",    "color": "orange"},
+    "CRITICAL": {"action": "flag",    "color": "red"},
+    "FAULT":    {"action": "flag",    "color": "red"},
+    # Emitted when a signal falls outside every configured tier. Reachable in
+    # practice: a hot spot covering <5% of pixels puts p95 below the mean, so
+    # the ΔT proxy goes negative and misses the 0-999 tier range. 'pass' keeps
+    # the pre-config behavior, but it IS a fail-open — a config whose tiers
+    # cover the full signal range never produces this, and switching it to
+    # 'monitor' surfaces the gap instead of swallowing it.
+    "OUT_OF_RANGE": {"action": "pass", "color": "grey"},
+}
+
+
+def severity_entry(severity):
+    """Look up a severity. Raises ValueError on an unknown label.
+
+    Fail-loud on purpose: an unrecognized severity used to fall through the
+    ensemble's membership tests and read as "not flagged", so a config using
+    a different vocabulary (ALERT vs ALARM) would silently pass faults.
+    """
+    entry = SEVERITY_REGISTRY.get(severity)
+    if entry is None:
+        raise ValueError(
+            f"unknown severity {severity!r}; known severities: "
+            f"{', '.join(sorted(SEVERITY_REGISTRY))}. Add it to SEVERITY_REGISTRY "
+            f"before referencing it from a threshold config."
+        )
+    return entry
+
+
+def severity_action(severity):
+    """'pass' | 'monitor' | 'flag' for a severity label."""
+    return severity_entry(severity)["action"]
+
+
+def severity_color(severity):
+    """Display color for a severity label."""
+    return severity_entry(severity)["color"]
+
+
+# --- Rule path: config validation helpers ---
+
+def _require(condition, message):
+    if not condition:
+        raise ValueError(f"threshold config: {message}")
+
+
+def _as_number(value, field):
+    _require(
+        isinstance(value, (int, float)) and not isinstance(value, bool),
+        f"'{field}' must be a number, got {value!r}",
+    )
+    return float(value)
+
+
+# --- Rule path: signal extraction (one per rule type) ---
+
+def _signal_top_oil(raw_0_255, eq_cfg, config, equipment):
+    """Linear map pixel -> absolute surface °C.
+
+    Max pixel represents the hottest visible region on the tank.
+    """
+    camera = config["camera"]
+    pixel_max = camera["pixel_max"]
+    temp_min, temp_max = camera["temp_min_c"], camera["temp_max_c"]
+    max_pixel = float(raw_0_255.max())
+    surface_c = temp_min + (max_pixel / pixel_max) * (temp_max - temp_min)
+    return surface_c, {
+        "label": "Surface proxy",
+        "value_str": f"{surface_c:.1f}°C",
+        "extra": f"Max pixel: {max_pixel:.0f} / {pixel_max:.0f}",
+    }
+
+
+def _signal_hotspot_delta(raw_0_255, eq_cfg, config, equipment):
+    """Hot-spot ΔT proxy: (percentile - mean), scaled into the tier range.
+
+    PV panels run hot and uniformly, so max-pixel alone is a bad signal.
+    """
+    pixel_max = config["camera"]["pixel_max"]
+    percentile = eq_cfg["percentile"]
+    p_hi = float(np.percentile(raw_0_255, percentile))
+    mean_pixel = float(raw_0_255.mean())
+    delta_c = (p_hi - mean_pixel) * (eq_cfg["delta_span_c"] / pixel_max)
+    return delta_c, {
+        "label": "Hot-spot ΔT proxy",
+        "value_str": f"{delta_c:.1f}°C (p{percentile:g} − mean scaled)",
+        "extra": f"p{percentile:g} pixel: {p_hi:.0f}, mean pixel: {mean_pixel:.0f}",
+    }
+
+
+# --- Rule path: verdict evaluation (one per rule type) ---
+
+def _resolve_ceiling_c(eq_cfg, config):
+    """Absolute ceiling, either given directly or derived from ambient.
+
+    SCADA setpoints are absolute (`ceiling_c`); the IEC default is expressed
+    relative to ambient (`ceiling_over_ambient_c`). Validation guarantees
+    exactly one is present.
+    """
+    if "ceiling_c" in eq_cfg:
+        return float(eq_cfg["ceiling_c"])
+    return float(config["ambient_c"]) + float(eq_cfg["ceiling_over_ambient_c"])
+
+
+def _verdict_top_oil(signal_c, eq_cfg, config, equipment):
+    offset_c = eq_cfg["surface_offset_c"]
+    calibrated_c = signal_c + offset_c
+    ceiling_c = _resolve_ceiling_c(eq_cfg, config)
+    detail = (
+        f"Estimated top-oil = surface {signal_c:.1f}°C + {offset_c:.0f}°C offset "
+        f"= {calibrated_c:.1f}°C "
+    )
+    if calibrated_c > ceiling_c:
+        return "CRITICAL", detail + f"exceeds ceiling {ceiling_c:.0f}°C"
+    return "PASS", detail + f"within ceiling {ceiling_c:.0f}°C"
+
+
+def _verdict_hotspot_delta(signal_c, eq_cfg, config, equipment):
+    for tier in eq_cfg["tiers"]:
+        lo, hi = tier["min_c"], tier["max_c"]
+        if lo <= signal_c < hi:
+            severity = tier["severity"]
+            return severity.upper(), (
+                f"Hot-spot ΔT proxy {signal_c:.1f}°C falls in "
+                f"'{severity}' tier [{lo}-{hi}°C)"
+            )
+    # No tier matched. See SEVERITY_REGISTRY["OUT_OF_RANGE"] for why this is a
+    # verdict rather than an error.
+    return "OUT_OF_RANGE", f"Hot-spot ΔT proxy {signal_c:.1f}°C outside all tiers"
+
+
+# --- Rule path: per-type validation ---
+
+def _validate_top_oil(name, eq_cfg):
+    _as_number(eq_cfg.get("surface_offset_c"), f"equipment.{name}.surface_offset_c")
+    has_absolute = "ceiling_c" in eq_cfg
+    has_relative = "ceiling_over_ambient_c" in eq_cfg
+    _require(
+        has_absolute or has_relative,
+        f"equipment.{name} needs either 'ceiling_c' (absolute, e.g. a SCADA setpoint) "
+        f"or 'ceiling_over_ambient_c' (derived from ambient_c)",
+    )
+    _require(
+        not (has_absolute and has_relative),
+        f"equipment.{name} sets both 'ceiling_c' and 'ceiling_over_ambient_c'; pick one",
+    )
+    field = "ceiling_c" if has_absolute else "ceiling_over_ambient_c"
+    _as_number(eq_cfg[field], f"equipment.{name}.{field}")
+
+
+def _validate_hotspot_delta(name, eq_cfg):
+    percentile = _as_number(eq_cfg.get("percentile"), f"equipment.{name}.percentile")
+    _require(
+        0 <= percentile <= 100,
+        f"equipment.{name}.percentile must be within 0-100, got {percentile}",
+    )
+    _as_number(eq_cfg.get("delta_span_c"), f"equipment.{name}.delta_span_c")
+
+    tiers = eq_cfg.get("tiers")
+    _require(
+        isinstance(tiers, list) and tiers,
+        f"equipment.{name}.tiers must be a non-empty list",
+    )
+
+    spans = []
+    for i, tier in enumerate(tiers):
+        where = f"equipment.{name}.tiers[{i}]"
+        _require(isinstance(tier, dict), f"{where} must be an object")
+        severity = tier.get("severity")
+        _require(isinstance(severity, str), f"{where}.severity must be a string")
+        try:
+            severity_entry(severity.upper())
+        except ValueError as exc:
+            raise ValueError(f"threshold config: {where}.severity: {exc}") from exc
+        lo = _as_number(tier.get("min_c"), f"{where}.min_c")
+        hi = _as_number(tier.get("max_c"), f"{where}.max_c")
+        _require(lo < hi, f"{where}: min_c ({lo}) must be less than max_c ({hi})")
+        spans.append((lo, hi, i))
+
+    spans.sort()
+    for (lo_a, hi_a, i_a), (lo_b, _hi_b, i_b) in zip(spans, spans[1:]):
+        _require(
+            hi_a <= lo_b,
+            f"equipment.{name}.tiers[{i_a}] [{lo_a}-{hi_a}) overlaps "
+            f"tiers[{i_b}] [{lo_b}-...)",
+        )
+
+
+# Rule-type registry — this is what `type` in the config dispatches on.
+# Adding a rule type means adding one entry here, not editing the pipeline.
+RULE_TYPES = {
+    "top_oil": {
+        "signal": _signal_top_oil,
+        "verdict": _verdict_top_oil,
+        "validate": _validate_top_oil,
+    },
+    "hotspot_delta": {
+        "signal": _signal_hotspot_delta,
+        "verdict": _verdict_hotspot_delta,
+        "validate": _validate_hotspot_delta,
+    },
+}
+
+
+# --- Rule path: config loading ---
+
+def validate_threshold_config(config):
+    """Check a parsed config end to end. Raises ValueError on the first problem.
+
+    Everything a rule type needs is checked here so failures surface at load
+    time with a file path attached, rather than mid-run on image 3 of 4.
+    """
+    _require(isinstance(config, dict), "top level must be an object")
+    _as_number(config.get("ambient_c"), "ambient_c")
+
+    camera = config.get("camera")
+    _require(isinstance(camera, dict), "'camera' must be an object")
+    for field in ("temp_min_c", "temp_max_c", "pixel_max"):
+        _as_number(camera.get(field), f"camera.{field}")
+    _require(
+        camera["temp_max_c"] > camera["temp_min_c"],
+        "camera.temp_max_c must be greater than camera.temp_min_c",
+    )
+    _require(camera["pixel_max"] > 0, "camera.pixel_max must be positive")
+
+    equipment_map = config.get("equipment")
+    _require(
+        isinstance(equipment_map, dict) and equipment_map,
+        "'equipment' must be a non-empty object",
+    )
+
+    for name, eq_cfg in equipment_map.items():
+        _require(isinstance(eq_cfg, dict), f"equipment.{name} must be an object")
+        rule_type = eq_cfg.get("type")
+        _require(
+            rule_type in RULE_TYPES,
+            f"equipment.{name}.type {rule_type!r} is not a known rule type; "
+            f"known types: {', '.join(sorted(RULE_TYPES))}",
+        )
+        RULE_TYPES[rule_type]["validate"](name, eq_cfg)
+
+    return config
+
+
+def load_threshold_config(path=None):
+    """Load and validate a rule-layer threshold config.
+
+    Schema (see config/thresholds_iec.json):
+      ambient_c            number  -- site ambient, used by ceiling_over_ambient_c
+      camera               object  -- temp_min_c, temp_max_c, pixel_max
+      equipment            object  -- keyed by equipment name; each entry has a
+                                      `type` from RULE_TYPES plus that type's fields
+
+    `path=None` loads the shipped IEC defaults.
+    """
+    path = Path(path) if path else DEFAULT_THRESHOLD_CONFIG
+    if not path.exists():
+        raise FileNotFoundError(f"threshold config not found: {path}")
+    with path.open(encoding="utf-8") as handle:
+        try:
+            config = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"threshold config {path} is not valid JSON: {exc}") from exc
+    # Stashed for error messages so a bad value points back at its file.
+    config["_source"] = str(path)
+    return validate_threshold_config(config)
+
+
+def equipment_config(config, equipment):
+    """Per-equipment block, or a ValueError naming what the config does define."""
+    equipment_map = config["equipment"]
+    if equipment not in equipment_map:
+        raise ValueError(
+            f"equipment {equipment!r} is not defined in {config['_source']}; "
+            f"available: {', '.join(sorted(equipment_map))}"
+        )
+    return equipment_map[equipment]
+
+
+# --- Rule path: public entry points ---
+
+def estimate_rule_signal(raw_0_255, equipment, config):
     """Compute the primary rule-layer signal for the given equipment type.
 
     Returns (signal_c, display_bits) where `signal_c` is the °C-ish value the
     rule tiers compare against, and `display_bits` is a dict of extra fields
-    the decision panel can show (max pixel, p95, mean, etc.).
+    the decision panel can show (max pixel, percentile, mean, etc.).
+
+    Dispatch is on the equipment's `type` field, so a new equipment entry that
+    reuses an existing rule type needs no code change here.
 
     Real radiometric calibration (per-pixel °C from a manufacturer-specific
     camera calibration) is HER-81 territory. The mappings here are stubs
     sized to produce usable demo signals from 8-bit imagery.
     """
-    max_pixel = float(raw_0_255.max())
-
-    if equipment == "transformer":
-        # Transformer: linear map pixel -> absolute surface °C; max pixel
-        # represents the hottest visible region on the tank.
-        surface_c = CAMERA_TEMP_MIN + (max_pixel / 255.0) * (CAMERA_TEMP_MAX - CAMERA_TEMP_MIN)
-        return surface_c, {
-            "label": "Surface proxy",
-            "value_str": f"{surface_c:.1f}°C",
-            "extra": f"Max pixel: {max_pixel:.0f} / 255",
-        }
-
-    if equipment == "pv":
-        # PV panels run hot and uniformly, so max-pixel alone is a bad signal.
-        # Instead use p95 - mean as a hot-spot ΔT proxy scaled into the
-        # DAR-141 hot-spot ΔT tier range (0-100-ish "°C").
-        p95 = float(np.percentile(raw_0_255, 95))
-        mean_pixel = float(raw_0_255.mean())
-        delta_c = (p95 - mean_pixel) * (100.0 / 255.0)
-        return delta_c, {
-            "label": "Hot-spot ΔT proxy",
-            "value_str": f"{delta_c:.1f}°C (p95 − mean scaled)",
-            "extra": f"p95 pixel: {p95:.0f}, mean pixel: {mean_pixel:.0f}",
-        }
-
-    return 0.0, {"label": "Unknown", "value_str": "n/a", "extra": ""}
+    eq_cfg = equipment_config(config, equipment)
+    extractor = RULE_TYPES[eq_cfg["type"]]["signal"]
+    return extractor(raw_0_255, eq_cfg, config, equipment)
 
 
-def rule_verdict(signal_c, equipment):
+def rule_verdict(signal_c, equipment, config):
     """Apply per-equipment rule-based thresholds. Returns (severity, explanation)."""
-    cfg = THRESHOLDS[equipment]
-    if equipment == "transformer":
-        calibrated_c = signal_c + TRANSFORMER_SURFACE_OFFSET_C if cfg["needs_surface_offset"] else signal_c
-        ceiling = cfg["ceiling_c"]
-        if calibrated_c > ceiling:
-            return "CRITICAL", (
-                f"Estimated top-oil = surface {signal_c:.1f}°C + 10°C offset = {calibrated_c:.1f}°C "
-                f"exceeds ceiling {ceiling:.0f}°C"
-            )
-        return "PASS", (
-            f"Estimated top-oil = surface {signal_c:.1f}°C + 10°C offset = {calibrated_c:.1f}°C "
-            f"within ceiling {ceiling:.0f}°C"
-        )
-    elif equipment == "pv":
-        for name, lo, hi, _color in cfg["tiers"]:
-            if lo <= signal_c < hi:
-                return name.upper(), (
-                    f"Hot-spot ΔT proxy {signal_c:.1f}°C falls in '{name}' tier [{lo}-{hi}°C)"
-                )
-        return "OUT_OF_RANGE", f"Hot-spot ΔT proxy {signal_c:.1f}°C outside all tiers"
-    return "UNKNOWN", "No rule for this equipment type"
+    eq_cfg = equipment_config(config, equipment)
+    evaluator = RULE_TYPES[eq_cfg["type"]]["verdict"]
+    return evaluator(signal_c, eq_cfg, config, equipment)
 
 
 # --- Ensemble ---
@@ -255,21 +485,24 @@ def rule_verdict(signal_c, equipment):
 def ensemble_decision(ml, rule):
     """Combine ML + rule verdicts.
 
-    - If either flags FAULT/CRITICAL/ALARM -> combined FLAGGED
-    - If rule says WARNING -> combined MONITOR
+    - If either flags (ML FAULT, or a rule severity whose action is 'flag')
+      -> combined FLAGGED
+    - If the rule severity's action is 'monitor' -> combined MONITOR
     - Otherwise NORMAL
+
+    Raises ValueError on an unknown rule severity rather than treating it as
+    'not flagged'.
     """
     ml_flagged = (ml == "FAULT")
-    rule_flagged = rule in ("CRITICAL", "ALARM", "FAULT")
-    rule_monitor = rule in ("WARNING",)
+    action = severity_action(rule)
 
-    if ml_flagged and rule_flagged:
+    if ml_flagged and action == "flag":
         return "FLAGGED (both layers)", "red"
     if ml_flagged:
         return "FLAGGED (ML only)", "red"
-    if rule_flagged:
+    if action == "flag":
         return "FLAGGED (rules only)", "red"
-    if rule_monitor:
+    if action == "monitor":
         return "MONITOR (warning tier)", "gold"
     return "NORMAL", "green"
 
@@ -336,13 +569,7 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
     ax4.axis("off")
 
     ml_color = "red" if ml == "FAULT" else "green"
-    rule_color_map = {
-        "PASS": "green", "NORMAL": "green",
-        "WARNING": "gold", "ALARM": "orange",
-        "CRITICAL": "red", "FAULT": "red",
-        "OUT_OF_RANGE": "grey", "UNKNOWN": "grey",
-    }
-    rule_color = rule_color_map.get(rule, "grey")
+    rule_color = severity_color(rule)
 
     lines = [
         ("Equipment:", "black", "bold"),
@@ -405,14 +632,14 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
 
 # --- Main pipeline ---
 
-def run_one(path, equipment, expected, model, mean, std, idx):
+def run_one(path, equipment, expected, model, mean, std, idx, config):
     raw, normed = load_image_for_inference(path, mean, std)
     recon_normed, err, mean_err = run_ml_inference(model, normed)
     recon_denorm = recon_normed * std + mean
 
     ml, ml_reason = ml_verdict(mean_err)
-    signal_c, signal_display = estimate_rule_signal(raw, equipment)
-    rule, rule_reason = rule_verdict(signal_c, equipment)
+    signal_c, signal_display = estimate_rule_signal(raw, equipment, config)
+    rule, rule_reason = rule_verdict(signal_c, equipment, config)
     final, final_color = ensemble_decision(ml, rule)
 
     # Console output
@@ -436,8 +663,13 @@ def main():
     parser.add_argument("--image", type=str, default=None,
                         help="Single image path. If omitted, runs the curated sample set.")
     parser.add_argument("--equipment", type=str, default="transformer",
-                        choices=["transformer", "pv"],
-                        help="Equipment type for rule-based layer.")
+                        help="Equipment type for rule-based layer. Must be a key under "
+                             "'equipment' in the threshold config (default config defines "
+                             "transformer, pv).")
+    parser.add_argument("--thresholds", type=str, default=None,
+                        help="Path to a rule-layer threshold JSON config. Defaults to "
+                             f"{DEFAULT_THRESHOLD_CONFIG.name} (IEC / manufacturer values). "
+                             "Point this at a utility's SCADA setpoints to swap them in.")
     parser.add_argument("--model", type=str, default="v2",
                         choices=["v2", "pv"],
                         help="Which autoencoder + norm stats to load. 'v2' = multi-equipment baseline, 'pv' = PV specialist.")
@@ -467,6 +699,27 @@ def main():
         norm_stats_path = NORM_STATS_PATH
         weights_path = MODEL_WEIGHTS
 
+    # Rule-layer thresholds. Load + validate before touching the model so a bad
+    # config fails in a second instead of after weights are on the device.
+    try:
+        config = load_threshold_config(args.thresholds)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    print(f"Thresholds: {config.get('name', 'unnamed')}  ({config['_source']})")
+
+    # Every equipment type this run will touch must exist in the config.
+    if args.image:
+        needed = {args.equipment}
+    else:
+        needed = {equipment for _path, equipment, _expected in DEFAULT_SAMPLES}
+    try:
+        for equipment in sorted(needed):
+            equipment_config(config, equipment)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
     # Norm stats + model
     stats = np.load(norm_stats_path, allow_pickle=True).item()
     mean, std = stats["mean"], stats["std"]
@@ -483,18 +736,19 @@ def main():
         path = Path(args.image)
         if not path.exists():
             print(f"ERROR: image not found: {path}")
-            return
-        run_one(path, args.equipment, args.expected, model, mean, std, idx=1)
+            return 1
+        run_one(path, args.equipment, args.expected, model, mean, std, idx=1, config=config)
     else:
         print("Running curated sample set (4 images)...")
         for i, (path, equipment, expected) in enumerate(DEFAULT_SAMPLES, 1):
             if not path.exists():
                 print(f"  SKIP [{i}] {path}: not found")
                 continue
-            run_one(path, equipment, expected, model, mean, std, idx=i)
+            run_one(path, equipment, expected, model, mean, std, idx=i, config=config)
 
     print(f"\nVisualizations saved to: {OUT_DIR}/")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

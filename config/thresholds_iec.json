@@ -1,0 +1,31 @@
+{
+  "name": "IEC / manufacturer defaults",
+  "description": "Default rule-layer thresholds for the ensemble demo. Sources: HI-105 section 6 (transformer top-oil ceiling), DAR-141 research + IEC 61215 / IEC 61730 / UL 61730 (PV hot-spot dT tiers). To supply utility-specific SCADA setpoints, copy this file, edit the numbers, and pass it with --thresholds <path>.",
+  "ambient_c": 35.0,
+  "camera": {
+    "description": "Stub 8-bit pixel -> degC calibration used by the demo. Real radiometric extraction is HER-81; a deployment camera reports degC directly and these become unused.",
+    "temp_min_c": 20.0,
+    "temp_max_c": 120.0,
+    "pixel_max": 255.0
+  },
+  "equipment": {
+    "transformer": {
+      "type": "top_oil",
+      "description": "Top-oil ceiling: ambient + 85 degC (HI-105 section 6). Greenville summer ambient assumed.",
+      "surface_offset_c": 10.0,
+      "ceiling_over_ambient_c": 85.0
+    },
+    "pv": {
+      "type": "hotspot_delta",
+      "description": "PV hot-spot dT tiers (DAR-141 research). 8-bit PV imagery cannot give absolute cell degC, so the rule layer uses a hot-spot dT proxy: (percentile - mean) scaled into the dT tier range.",
+      "percentile": 95,
+      "delta_span_c": 100.0,
+      "tiers": [
+        { "severity": "normal", "min_c": 0, "max_c": 15 },
+        { "severity": "warning", "min_c": 15, "max_c": 40 },
+        { "severity": "alarm", "min_c": 40, "max_c": 75 },
+        { "severity": "critical", "min_c": 75, "max_c": 999 }
+      ]
+    }
+  }
+}
