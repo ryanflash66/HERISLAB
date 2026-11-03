@@ -87,7 +87,7 @@ def main():
         print(f"Device: {DEVICE}")
         print(f"Model:  {MODEL_PATH}")
         model = ThermalAutoencoder().to(DEVICE)
-        model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True))
 
         stats = np.load(DATA_DIR / "norm_stats.npy", allow_pickle=True).item()
         print(f"O&M norm stats: mean={stats['mean']:.4f} std={stats['std']:.4f}")
