@@ -1,10 +1,12 @@
 """
 Evaluate the PV-specialist autoencoder (HER-90).
 
-Loads the PV-specialist weights and scores them against the PV-only held-out
-test set produced by src/preprocess_pv.py. Reuses the threshold calibration
-+ AUROC helpers from evaluate_autoencoder.py so the numbers are directly
-comparable to the v2 baseline.
+Loads the PV-specialist weights and scores them against the PV-only test
+split produced by src/preprocess_pv.py. That split is random per frame, so
+frames from the same video can sit in both train and test (not independent).
+Reuses the threshold calibration + AUROC helpers from evaluate_autoencoder.py,
+so the metric code is the same as the v2 baseline; the test sets and the
+preprocessing differ, so the numbers are not a like-for-like comparison.
 
 Inputs:
   models/autoencoder_pv_best.pth

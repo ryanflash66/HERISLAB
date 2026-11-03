@@ -1,5 +1,5 @@
 """
-Preprocessing pipeline for Convolutional Autoencoder (Track A).
+Preprocessing pipeline for Convolutional Autoencoder.
 
 Loads images from CA_Training_Data/, standardizes them, and saves
 as .npy arrays ready for training.
@@ -7,16 +7,19 @@ as .npy arrays ready for training.
 Approach:
   - Single-channel grayscale
   - 320x240 pixels (native motor image resolution)
-  - All images scaled to 0-255 range first (camera-agnostic):
+  - All images brought to a common 0-255 numeric range first. This is NOT
+    camera-agnostic; the two branches differ (see load_image_raw):
       * 16-bit radiometric TIFFs: per-image min-max scaled to 0-255
-      * 8-bit images: already in 0-255
+      * 8-bit images: passed through unchanged
   - Then Z-score normalization using train-set global stats: (pixel - mean) / std
-  - Preserves relative intensity patterns across all source types
+  - Within a 16-bit image the relative intensity pattern is kept; absolute
+    temperature is discarded, and 8-bit and 16-bit sources end up with
+    different brightness distributions (HER-107)
   - Drops solar_modules (24x40, too small to upscale meaningfully)
 
-In production, the same two-step process runs on any camera input:
-  1. Scale raw pixels to 0-255
-  2. Z-score with saved mean/std
+Untested on other cameras: running the same two steps (scale to 0-255, then
+Z-score with saved mean/std) on a new camera's output is the plan, not a
+verified property.
 """
 
 import os
@@ -55,10 +58,15 @@ TEST_FAULT_FOLDERS = [
 def load_image_raw(filepath):
     """Load a single image as grayscale float32 scaled to 0-255 range.
 
-    This makes the pipeline camera-agnostic:
-      - 16-bit radiometric TIFFs (values like 6000-14000) get min-max
-        scaled to 0-255, preserving the thermal contrast within the image
-      - 8-bit PNGs/BMPs/JPGs are already in 0-255
+    This gives every format the same numeric range. It does NOT make
+    different cameras comparable:
+      - 16-bit radiometric TIFFs (values like 6000-14000) are min-max
+        stretched per image to 0-255. This keeps contrast within the image
+        but discards absolute temperature, and lifts the dark end.
+      - 8-bit PNGs/BMPs/JPGs are passed through unchanged.
+    The two branches therefore produce different brightness distributions
+    (a source cue a model can exploit). See HER-107 and HER-82.
+    The branch is chosen from the image max (> 255), not file metadata.
     """
     img = Image.open(filepath)
     arr = np.array(img, dtype=np.float32)
