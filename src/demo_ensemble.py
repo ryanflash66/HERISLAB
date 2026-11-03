@@ -3,8 +3,9 @@ Demo: ensemble inference pipeline stub (HER-81 preview).
 
 For a single image, runs:
   1. ML path   — v2 autoencoder → per-image reconstruction error → ML verdict
-  2. Rule path — surface-temperature proxy from the 8-bit image → threshold
-                 comparison against per-equipment manual limits → rule verdict
+  2. Rule path — contrast proxy from the 8-bit image (placeholder map, not
+                 real temperature) → threshold comparison against
+                 per-equipment manual limits → rule verdict
   3. Ensemble  — combined decision with explanation
 
 Produces a 5-panel matplotlib visualization:
@@ -25,9 +26,10 @@ shape. See load_threshold_config() for the schema and RULE_TYPES for the
 supported rule types.
 
 NOTE: this is a STUB, not HER-81's production implementation. The "temperature
-extraction" step assumes a linear map from 8-bit pixel values to a plausible
-camera operating range (20-120°C) — real radiometric-to-°C calibration is
-HER-81 scope.
+extraction" step is a placeholder: a linear map of pixel 0 = 20°C, 255 = 120°C.
+Images are min-max stretched per image first, so the numbers are not real
+temperatures and the ΔT proxy measures contrast, not degrees. Real
+radiometric-to-°C calibration is HER-81 scope.
 """
 
 import argparse
@@ -123,7 +125,7 @@ def load_original_for_display(path):
     return arr.astype(np.float32), "mono"
 
 
-# --- Preprocessing (mirrors preprocess.py / generate_heatmaps.py) ---
+# --- Preprocessing (copy of the preprocess.py steps; keep in sync by hand) ---
 
 def load_image_for_inference(path, mean, std):
     """Scale to 0-255, resize, then z-score normalize.
@@ -230,9 +232,11 @@ def _as_number(value, field):
 # --- Rule path: signal extraction (one per rule type) ---
 
 def _signal_top_oil(raw_0_255, eq_cfg, config, equipment):
-    """Linear map pixel -> absolute surface °C.
+    """Placeholder linear map pixel -> "surface °C" (0 = temp_min_c, 255 = temp_max_c).
 
-    Max pixel represents the hottest visible region on the tank.
+    Not a real temperature: the image was min-max stretched per image, so the
+    brightest pixel maps to ~temp_max_c whatever the scene. Max pixel is the
+    hottest visible region on the tank.
     """
     camera = config["camera"]
     pixel_max = camera["pixel_max"]
@@ -247,8 +251,9 @@ def _signal_top_oil(raw_0_255, eq_cfg, config, equipment):
 
 
 def _signal_hotspot_delta(raw_0_255, eq_cfg, config, equipment):
-    """Hot-spot ΔT proxy: (percentile - mean), scaled into the tier range.
+    """Hot-spot contrast proxy: (percentile - mean), scaled into the tier range.
 
+    Measures pixel contrast, not degrees (placeholder scaling; see module NOTE).
     PV panels run hot and uniformly, so max-pixel alone is a bad signal.
     """
     pixel_max = config["camera"]["pixel_max"]
@@ -457,7 +462,7 @@ def equipment_config(config, equipment):
 def estimate_rule_signal(raw_0_255, equipment, config):
     """Compute the primary rule-layer signal for the given equipment type.
 
-    Returns (signal_c, display_bits) where `signal_c` is the °C-ish value the
+    Returns (signal_c, display_bits) where `signal_c` is the placeholder "°C" value the
     rule tiers compare against, and `display_bits` is a dict of extra fields
     the decision panel can show (max pixel, percentile, mean, etc.).
 

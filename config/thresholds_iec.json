@@ -3,7 +3,7 @@
   "description": "Default rule-layer thresholds for the ensemble demo. Sources: HI-105 section 6 (transformer top-oil ceiling), DAR-141 research + IEC 61215 / IEC 61730 / UL 61730 (PV hot-spot dT tiers). To supply utility-specific SCADA setpoints, copy this file, edit the numbers, and pass it with --thresholds <path>.",
   "ambient_c": 35.0,
   "camera": {
-    "description": "Stub 8-bit pixel -> degC calibration used by the demo. Real radiometric extraction is HER-81; a deployment camera reports degC directly and these become unused.",
+    "description": "Placeholder 8-bit pixel -> degC map used by the demo (pixel 0 = 20 degC, 255 = 120 degC). Images are min-max stretched per image first, so these are not real temperatures. Real radiometric extraction is HER-81; once a camera reports degC directly these become unused.",
     "temp_min_c": 20.0,
     "temp_max_c": 120.0,
     "pixel_max": 255.0
@@ -17,7 +17,7 @@
     },
     "pv": {
       "type": "hotspot_delta",
-      "description": "PV hot-spot dT tiers (DAR-141 research). 8-bit PV imagery cannot give absolute cell degC, so the rule layer uses a hot-spot dT proxy: (percentile - mean) scaled into the dT tier range.",
+      "description": "PV hot-spot dT tiers (DAR-141 research). 8-bit PV imagery cannot give absolute cell degC, so the rule layer uses a contrast proxy: (percentile - mean) scaled into the dT tier range. It measures pixel contrast, not degrees, so the tiers are not validated dT limits.",
       "percentile": 95,
       "delta_span_c": 100.0,
       "tiers": [

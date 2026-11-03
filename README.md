@@ -19,7 +19,7 @@ Thermal imaging is widely used for non-destructive inspection of electrical equi
 | Precision | 0.962 |
 | Recall | 1.000 |
 
-Evaluated on 37 normal and 685 fault test images spanning electric motor, induction motor, and transformer thermal datasets. Recall of 1.000 means every fault in the test set was detected. The 27 false positives reflect the current F1-optimized threshold; tightening the threshold trades a small recall hit for fewer false alarms (tracked under HER-21).
+These are the multi-equipment (general) model's numbers, not the PV specialist's. They come from 37 normal and 685 fault test images spanning electric motor, induction motor, and transformer thermal datasets (no PV images), a test set that is heavily fault-skewed, so F1, precision and recall depend on that mix. The evaluation-validity audit found that image brightness alone separates the PV normal and fault sets almost as well as the model does (1st-percentile pixel AUROC 0.972 vs the autoencoder's 0.974), because 16-bit and 8-bit sources are scaled differently (HER-107). Treat these scores as unconfirmed until that is fixed. Recall of 1.000 means every fault in the test set was detected. The 27 false positives reflect the current F1-optimized threshold; tightening the threshold trades a small recall hit for fewer false alarms (tracked under HER-21).
 
 ## Architecture
 
@@ -79,7 +79,7 @@ Training data is sourced from multiple public thermal imaging datasets:
 
 **Preprocessing pipeline:**
 1. Load as grayscale float32
-2. Scale to common 0-255 range (16-bit radiometric TIFFs are min-max scaled; 8-bit images pass through)
+2. Scale to common 0-255 range (16-bit radiometric TIFFs are min-max scaled per image, which discards absolute temperature; 8-bit images pass through unchanged, so the two sources end up with different brightness distributions)
 3. Resize to 320x240 using Lanczos resampling
 4. Z-score normalize using training set global statistics (mean=171.73, std=45.97)
 

@@ -5,8 +5,9 @@ Produces PV-only .npy arrays with PV-specific norm stats, separate from the
 v2 multi-equipment pipeline in `preprocess.py`.
 
 Splits the existing PV normals (`pv_om_inspection` + `pv_thermal_inspection`)
-deterministically (seed=42) into ~90% train / ~10% held-out test so the
-specialist can be evaluated on data it never saw at training time:
+deterministically (seed=42) into ~90% train / ~10% test. The split is random
+per frame, not per video or site, so neighbouring frames of the same video can
+land on both sides; the "test" set is not independent of training:
 
   data/CA_Preprocessed/pv/
     train_normal.npy    (~8,020, 240, 320) float32
@@ -45,9 +46,10 @@ PV_TEST_FAULT_FOLDER = "pv"
 def load_image_raw(filepath):
     """Load a single image as grayscale float32 scaled to 0-255.
 
-    Mirrors preprocess.py so the PV specialist sees identically formatted
-    inputs (any divergence here would invalidate apples-to-apples comparison
-    against the v2 baseline).
+    Copies the steps of preprocess.py:load_image_raw (16-bit files min-max
+    stretched per image, 8-bit files passed through), so it carries the same
+    format gap between 16-bit and 8-bit sources (HER-107). Keep the two in
+    sync by hand; nothing enforces it.
     """
     img = Image.open(filepath)
     arr = np.array(img, dtype=np.float32)
