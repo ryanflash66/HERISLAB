@@ -13,7 +13,9 @@ trained WITHOUT the THM aerial-survey frames:
 Reported: AUROC with bootstrap 95% CI (1,000 files and 140 unique faults),
 confusion at the re-tuned threshold, flag-everything F1, single-statistic
 baselines incl. p1, 16-statistic logistic regression, adjacent-frame leakage,
-source AUROC (O&M sequence dr vs sr), THM flag rate of the new model.
+source AUROC (O&M sequence dr vs sr), THM flag rate of the new model. The
+split and arrays come from hlab.datasets ("pv_om"), the threshold from the
+"pv_om" bundle.
 
 The THM+O&M rows (scenarios a and b) are read from results/her-114/rerun_summary.csv
 so the three can be shown side by side.
@@ -23,66 +25,39 @@ Usage:
 Writes results/her-114_retrain/audit_retrain_om_only.txt, summary.md, summary.csv
 """
 import csv
-import hashlib
 import io
 import sys
-from collections import defaultdict
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_eval_validity as A  # noqa: E402
 import audit_her114_reruns as R  # noqa: E402
+from hlab.bundle import Bundle  # noqa: E402
+from hlab.datasets import Dataset  # noqa: E402
 from hlab.metrics import confusion, from_groups  # noqa: E402
 
 ROOT = A.ROOT
-PRE_OM = A.PRE / "pv_om"
-OUT = ROOT / "results" / "her-114_retrain"
-PREV = ROOT / "results" / "her-114" / "rerun_summary.csv"
-
-
-def read_manifest(path):
-    tr, ho, sec = [], [], None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line == "[TRAIN]": sec = tr; continue
-        if line == "[HOLDOUT]": sec = ho; continue
-        if line and not line.startswith("#") and sec is not None:
-            sec.append(line)
-    return tr, ho
+OUT = A.RES / "her-114_retrain"
+PREV = A.RES / "her-114" / "rerun_summary.csv"
 
 
 def load_inputs():
-    fault_dir = A.RAW / "test" / "fault" / "pv"
-    files = sorted(p.name for p in fault_dir.iterdir() if p.is_file())
-    pix = {f: hashlib.md5(np.array(Image.open(fault_dir / f)).tobytes()).hexdigest() for f in files}
-    groups = defaultdict(list)
-    for f, h in pix.items():
-        groups[h].append(f)
-    gid_of = {h: i for i, h in enumerate(groups)}
-    gid = np.array([gid_of[pix[f]] for f in files])
-    G = len(groups)
-    tr, ho = read_manifest(PRE_OM / "split_manifest.txt")
-    assert not any("THM_" in p for p in tr + ho), "THM frame found in the O&M-only split"
-    pvn = np.load(A.RES / "pv_om_normal_errors.npy")
-    pvf = np.load(A.RES / "pv_om_fault_errors.npy")
-    assert len(pvn) == len(ho) and len(pvf) == len(files) == 1000, (len(pvn), len(ho), len(pvf))
-    fu = np.array([pvf[gid == g].mean() for g in range(G)])
-    print(f"O&M-only split: {len(tr)} train / {len(ho)} holdout; faults {len(files)} files / {G} unique")
-    print("Computing global image statistics (no model)...")
-    pvnF = A.global_features(PRE_OM / "test_normal.npy", PRE_OM / "norm_stats.npy")
-    pvfF = A.global_features(PRE_OM / "test_fault.npy", PRE_OM / "norm_stats.npy")
-    pvfF_u = np.array([pvfF[gid == g][0] for g in range(G)])
-    return dict(tr=tr, ho=ho, pvn=pvn, pvf=pvf, fu=fu, pvnF=pvnF, pvfF_u=pvfF_u)
+    ds = Dataset("pv_om")
+    assert not any(src == "thm" for _f, _split, src in ds.manifest()), "THM frame found in the O&M-only split"
+    D = R.load_inputs(ds, errors_prefix="pv_om")
+    print(f"O&M-only split: {D['n_train']} train / {len(D['ho'])} holdout; "
+          f"faults {len(D['pvf'])} files / {D['n_unique']} unique")
+    return D
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    M = np.load(A.RES / "pv_om_eval_metrics.npy", allow_pickle=True).item()
-    thr = float(M["threshold"])
+    om = Bundle.load("pv_om")
+    thr = om.require_threshold()
+    M = np.load(om.metrics_path, allow_pickle=True).item()   # THM flag rates recorded by the evaluator
     buf = io.StringIO()
     with redirect_stdout(buf):
         print("=" * 70, "\nHER-114 retrain: O&M-only PV specialist\n" + "=" * 70)
@@ -108,7 +83,7 @@ def main():
         prev = {r["scenario"]: r for r in csv.DictReader(fh)}
     for key, model in [("a_as_is", "THM+O&M model, holdout as is"),
                        ("b_thm_removed", "THM+O&M model, THM dropped at evaluation")]:
-        r = dict(prev[key]); r["model"] = model; r["threshold"] = "0.027865"
+        r = dict(prev[key]); r["model"] = model; r["threshold"] = f"{A.PV_THR:.6f}"
         r["thm_flag_rate_holdout84"] = "96.4% (81/84)" if key == "a_as_is" else "n/a (not scored)"
         r["thm_flag_rate_all"] = "n/a"
         rows.append(r)

@@ -28,12 +28,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "data" / "sources"
+from hlab.paths import MANIFESTS, ROOT, SOURCES
+
+SRC = SOURCES
 MANIFEST = SRC / "thermal_library_meta" / "manifest.csv"
 INDIA = SRC / "thermal_library_india"
 CERT = SRC / "thermal_library_certified"
-OUT = ROOT / "docs" / "data_manifests" / "india_plot_split.csv"
+OUT = MANIFESTS / "india_plot_split.csv"
 
 PLOT_SPLIT = {"17": "train", "16": "val", "18": "test"}
 INDIA_SETS = {

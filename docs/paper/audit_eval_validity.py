@@ -4,8 +4,9 @@ Evaluation-validity audit for the HERIS Lab thermal anomaly detectors.
 Reproduces every number in the paper draft (Problem Statement, Method, Results) that is
 not already printed by evaluate_autoencoder.py / evaluate_autoencoder_pv.py.
 It never retrains or re-runs a model: it reads the saved reconstruction errors
-in results/, the preprocessed arrays in data/CA_Preprocessed/, the PV split
-manifest, and the raw PVMD files.
+in results/, the preprocessed arrays and split manifests through
+hlab.datasets, the saved thresholds through hlab.bundle (weights are never
+loaded), and the raw PVMD files.
 
 Checks:
   1. PVMD duplicates: pixel-identical files, and files whose pixels appear
@@ -26,27 +27,24 @@ Usage:
     venv\\Scripts\\python.exe docs\\paper\\audit_eval_validity.py
 """
 
-import hashlib
-import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # until hlab is installable
+from hlab.bundle import Bundle  # noqa: E402
+from hlab.datasets import Dataset, adjacent_frame, pvmd_unique_groups  # noqa: E402
 from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion, from_groups, trivial_f1  # noqa: E402
+from hlab.paths import PREPROCESSED as PRE, RAW, RESULTS as RES, ROOT  # noqa: E402,F401
 from hlab.rules import RuleConfig, combine, evaluate  # noqa: E402
 from hlab.transform import denormalize  # noqa: E402
 
-PRE = ROOT / "data" / "CA_Preprocessed"
-RAW = ROOT / "data" / "CA_Training_Data"
-RES = ROOT / "results"
-
-PV_THR = 0.027865182608366013   # results/pv_eval_metrics.npy
-V2_THR = 0.0003388182958588004  # results/eval_metrics.npy
+# The evaluators' frozen best-F1 thresholds (results/*_eval_metrics.npy), read through the bundles.
+PV_THR = Bundle.load("pv").require_threshold()
+V2_THR = Bundle.load("v2").require_threshold()
 SEED = 0                        # bootstrap / cross-validation seed, passed explicitly
 
 
@@ -82,12 +80,11 @@ FEAT = ["mean", "std", "min", "max", "p1", "p5", "p50", "p95", "p99", "p95_minus
         "frac_ge250", "frac_le5", "grad_x", "grad_y", "laplacian", "hist_entropy"]
 
 
-def global_features(arr_path, stats_path):
-    st = np.load(stats_path, allow_pickle=True).item()
-    A = np.load(arr_path, mmap_mode="r")
+def global_features(x, stats):
+    """16 global statistics per image of a z-scored array, computed on the 0-255 values."""
     rows = []
-    for i in range(A.shape[0]):
-        r = np.asarray(A[i], dtype=np.float32) * st["std"] + st["mean"]  # back to 0-255
+    for i in range(len(x)):
+        r = denormalize(x[i], stats)  # back to 0-255
         p = np.percentile(r, [1, 5, 50, 95, 99])
         h, _ = np.histogram(np.clip(r, 0, 255), bins=32, range=(0, 255)); h = h / h.sum()
         lap = np.abs(4 * r[1:-1, 1:-1] - r[:-2, 1:-1] - r[2:, 1:-1] - r[1:-1, :-2] - r[1:-1, 2:]).mean()
@@ -96,13 +93,6 @@ def global_features(arr_path, stats_path):
                      np.abs(np.diff(r, axis=1)).mean(), np.abs(np.diff(r, axis=0)).mean(),
                      lap, -(h[h > 0] * np.log2(h[h > 0])).sum()])
     return np.array(rows)
-
-
-def images_0_255(arr_path, stats_path, indices):
-    """De-normalised (0-255) images at `indices` of a stored z-scored array."""
-    st = np.load(stats_path, allow_pickle=True).item()
-    A = np.load(arr_path, mmap_mode="r")
-    return [denormalize(A[i], st) for i in indices]
 
 
 def rule_counts(config, images, equipment, ml_flags):
@@ -115,61 +105,37 @@ def rule_counts(config, images, equipment, ml_flags):
     return dict(Counter(sev)), dict(Counter(final)), sum(s in ("ALARM", "CRITICAL") for s in sev)
 
 
-def read_manifest():
-    tr, ho, sec = [], [], None
-    for line in (PRE / "pv" / "split_manifest.txt").read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line == "[TRAIN]": sec = tr; continue
-        if line == "[HOLDOUT]": sec = ho; continue
-        if line and not line.startswith("#") and sec is not None:
-            sec.append(line)
-    return tr, ho
-
-
 def main():
     print("=" * 70, "\n1. PVMD duplicates\n" + "=" * 70)
     fault_dir = RAW / "test" / "fault" / "pv"
-    files = sorted(p.name for p in fault_dir.iterdir() if p.is_file())  # same order as preprocess_pv.py
-    pix = {f: hashlib.md5(np.array(Image.open(fault_dir / f)).tobytes()).hexdigest() for f in files}
-    groups = defaultdict(list)
-    for f, h in pix.items():
-        groups[h].append(f)
+    files, gid, groups = pvmd_unique_groups()   # same file order as preprocess_pv.py
     multi = sum(len(v) for v in groups.values() if len({x[0].upper() for x in v}) > 1)
     print(f"files: {len(files)}   pixel-unique images: {len(groups)}")
     print(f"files whose pixels also appear under another fault label: {multi}")
     print("label mix of unique images:", dict(Counter("".join(sorted({x[0].upper() for x in v})) for v in groups.values())))
     # PVMD stores some rotation augmentations only as an EXIF orientation tag, which the
     # preprocessing ignores. Recount with the tag applied so both views are reported.
-    from PIL import ImageOps
     exif_tag = {f: Image.open(fault_dir / f).getexif().get(274, 1) for f in files}
-    pix_t = {f: hashlib.md5(np.array(ImageOps.exif_transpose(Image.open(fault_dir / f))).tobytes()).hexdigest()
-             for f in files}
-    groups_t = defaultdict(list)
-    for f, h in pix_t.items():
-        groups_t[h].append(f)
+    _, _, groups_t = pvmd_unique_groups(exif_transpose=True)
     multi_t = sum(len(v) for v in groups_t.values() if len({x[0].upper() for x in v}) > 1)
     print(f"files with a non-default EXIF orientation tag: {sum(1 for v in exif_tag.values() if v != 1)}")
     print(f"unique images with EXIF orientation applied: {len(groups_t)}   "
           f"files sharing an image with another label: {multi_t}")
     print("label mix with EXIF applied:", dict(Counter("".join(sorted({x[0].upper() for x in v})) for v in groups_t.values())))
-    gid_of = {h: i for i, h in enumerate(groups)}
-    gid = np.array([gid_of[pix[f]] for f in files])
     G = len(groups)
 
     print("\n" + "=" * 70, "\n2. Temporal leakage in the PV normal split\n" + "=" * 70)
-    tr, ho = read_manifest()
-    trs = set(tr)
-
-    def neighbour(p, d):
-        m = re.search(r"(\d+)(\.tiff?)$", p)
-        return p[:m.start(1)] + str(int(m.group(1)) + d).zfill(len(m.group(1))) + m.group(2)
-    adj = sum(any(neighbour(p, d) in trs for d in (-1, 1)) for p in ho)
+    pvds = Dataset("pv")
+    holdout = pvds.split("holdout")
+    ho = holdout.frame_ids
+    trs = {f for f, split, _src in pvds.manifest() if split == "train"}
+    adj = sum(any(adjacent_frame(p, d) in trs for d in (-1, 1)) for p in ho)
     print(f"held-out normals with an immediately adjacent frame in TRAIN: {adj} / {len(ho)}")
 
     print("\n" + "=" * 70, "\n3. Source shortcut (PV specialist)\n" + "=" * 70)
     pvn = np.load(RES / "pv_normal_errors.npy"); pvf = np.load(RES / "pv_fault_errors.npy")
     fu = np.array([pvf[gid == g].mean() for g in range(G)])
-    src = np.array(["thm" if "THM_" in p else "om" for p in ho])
+    src = holdout.source
     for s in ("om", "thm"):
         e = pvn[src == s]
         print(f"healthy {s:3s}: n={len(e):4d}  median err {np.median(e):.4f}  flagged at thr {(e > PV_THR).sum()}")
@@ -188,11 +154,14 @@ def main():
         print("  re-tuned best-F1   :", rounded(confusion(s, y, best_f1_threshold(s, y))))
 
     print("\nComputing global image statistics (no model)...")
-    pvnF = global_features(PRE / "pv" / "test_normal.npy", PRE / "pv" / "norm_stats.npy")
-    pvfF = global_features(PRE / "pv" / "test_fault.npy", PRE / "pv" / "norm_stats.npy")
+    pv_fault = pvds.split("fault")
+    pvnF = global_features(holdout.x, pvds.stats)
+    pvfF = global_features(pv_fault.x, pvds.stats)
     pvfF_u = np.array([pvfF[gid == g][0] for g in range(G)])
-    gnF = global_features(PRE / "test_normal.npy", PRE / "norm_stats.npy")
-    gfF = global_features(PRE / "test_fault.npy", PRE / "norm_stats.npy")
+    v2ds = Dataset("v2")
+    v2n, v2f = v2ds.split("test_normal"), v2ds.split("test_fault")
+    gnF = global_features(v2n.x, v2ds.stats)
+    gfF = global_features(v2f.x, v2ds.stats)
     for name, a, b in [("PV (unique faults)", pvnF, pvfF_u), ("v2 general", gnF, gfF)]:
         aj = [auroc(*from_groups(a[:, j], b[:, j])) for j in range(len(FEAT))]
         single = {k: max(v, 1 - v) for k, v in zip(FEAT, aj)}
@@ -203,17 +172,17 @@ def main():
     config = RuleConfig.load()
     print("\n" + "=" * 70, f"\n6. Rule layer ({Path(config.source).relative_to(ROOT).as_posix()} defaults)\n" + "=" * 70)
     unique_first = [int(np.flatnonzero(gid == g)[0]) for g in range(G)]
-    pv_stats = PRE / "pv" / "norm_stats.npy"
-    for name, imgs, e in [("PV healthy", images_0_255(PRE / "pv" / "test_normal.npy", pv_stats, range(len(pvn))), pvn),
-                          ("PV unique faults", images_0_255(PRE / "pv" / "test_fault.npy", pv_stats, unique_first), fu)]:
+    for name, imgs, e in [("PV healthy", denormalize(holdout.x, pvds.stats), pvn),
+                          ("PV unique faults", denormalize(pv_fault.x[unique_first], pvds.stats), fu)]:
         tiers, final, _ = rule_counts(config, imgs, "pv", e > PV_THR)
         print(f"{name}: tiers {tiers}  ensemble {final}")
     ceiling = float(config.ambient_c) + float(config.equipment("transformer")["ceiling_over_ambient_c"])
-    for s, n_idx, f_idx in [("transformer", range(33, 37), range(452, 685))]:
-        for lab, arr, idx, e in [("healthy", PRE / "test_normal.npy", n_idx, gn[list(n_idx)]),
-                                 ("fault", PRE / "test_fault.npy", f_idx, gf[list(f_idx)])]:
-            _, _, flagged = rule_counts(config, images_0_255(arr, PRE / "norm_stats.npy", idx), s, e > V2_THR)
-            print(f"{s} {lab}: n={len(e)} AE flags {(e > V2_THR).sum()}  top-oil rule (>{ceiling:.0f} C) flags {flagged}")
+    for s in ("transformer",):
+        for lab, split, e in [("healthy", v2n, gn), ("fault", v2f, gf)]:
+            keep = v2ds.frames(split, source=s)
+            _, _, flagged = rule_counts(config, denormalize(split.x[keep], v2ds.stats), s, e[keep] > V2_THR)
+            print(f"{s} {lab}: n={int(keep.sum())} AE flags {(e[keep] > V2_THR).sum()}  "
+                  f"top-oil rule (>{ceiling:.0f} C) flags {flagged}")
 
 
 if __name__ == "__main__":

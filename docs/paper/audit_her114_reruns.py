@@ -29,51 +29,46 @@ Usage:
 Writes results/her-114/rerun_<scenario>.txt and results/her-114/rerun_summary.md
 """
 import csv
-import hashlib
 import io
-import re
 import sys
-from collections import defaultdict
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_eval_validity as A  # noqa: E402  (puts src/ on sys.path)
+from hlab.datasets import Dataset, adjacent_frame, pvmd_unique_groups  # noqa: E402
 from hlab.metrics import auroc, auroc_ci, confusion, from_groups, trivial_f1  # noqa: E402
+from hlab.paths import MANIFESTS  # noqa: E402
 
 ROOT = A.ROOT
-OUT = ROOT / "results" / "her-114"
-SCREEN = ROOT / "docs" / "data_manifests" / "thm_screened_frames.csv"
+OUT = A.RES / "her-114"
+SCREEN = MANIFESTS / "thm_screened_frames.csv"
 
 
-def load_inputs():
-    fault_dir = A.RAW / "test" / "fault" / "pv"
-    files = sorted(p.name for p in fault_dir.iterdir() if p.is_file())
-    pix = {f: hashlib.md5(np.array(Image.open(fault_dir / f)).tobytes()).hexdigest() for f in files}
-    groups = defaultdict(list)
-    for f, h in pix.items():
-        groups[h].append(f)
-    gid_of = {h: i for i, h in enumerate(groups)}
-    gid = np.array([gid_of[pix[f]] for f in files])
+def source_labels(split):
+    """'thm' | 'om_dr' | 'om_sr' per healthy frame."""
+    return np.array([s if s == "thm" else f"om_{m['sequence']}" for s, m in zip(split.source, split.meta)])
+
+
+def load_inputs(dataset=None, errors_prefix="pv"):
+    """Holdout frames, saved errors and global features of one PV dataset ("pv" or "pv_om")."""
+    ds = dataset or Dataset("pv")
+    files, gid, groups = pvmd_unique_groups()
     G = len(groups)
-    tr, ho = A.read_manifest()
-    pvn = np.load(A.RES / "pv_normal_errors.npy")
-    pvf = np.load(A.RES / "pv_fault_errors.npy")
-    assert len(pvn) == len(ho) == 892 and len(pvf) == len(files) == 1000
+    holdout, fault = ds.split("holdout"), ds.split("fault")
+    tr = [f for f, split, _src in ds.manifest() if split == "train"]
+    pvn = np.load(A.RES / f"{errors_prefix}_normal_errors.npy")
+    pvf = np.load(A.RES / f"{errors_prefix}_fault_errors.npy")
+    assert len(pvn) == len(holdout) and len(pvf) == len(files) == 1000, (len(pvn), len(holdout), len(pvf))
     fu = np.array([pvf[gid == g].mean() for g in range(G)])
     print("Computing global image statistics (no model)...")
-    pvnF = A.global_features(A.PRE / "pv" / "test_normal.npy", A.PRE / "pv" / "norm_stats.npy")
-    pvfF = A.global_features(A.PRE / "pv" / "test_fault.npy", A.PRE / "pv" / "norm_stats.npy")
+    pvnF = A.global_features(holdout.x, ds.stats)
+    pvfF = A.global_features(fault.x, ds.stats)
     pvfF_u = np.array([pvfF[gid == g][0] for g in range(G)])
-    return dict(tr=tr, ho=ho, pvn=pvn, pvf=pvf, fu=fu, pvnF=pvnF, pvfF_u=pvfF_u)
-
-
-def neighbour(p, d):
-    m = re.search(r"(\d+)(\.tiff?)$", p)
-    return p[:m.start(1)] + str(int(m.group(1)) + d).zfill(len(m.group(1))) + m.group(2)
+    return dict(tr=tr, ho=holdout.frame_ids, src=source_labels(holdout), pvn=pvn, pvf=pvf, fu=fu,
+                pvnF=pvnF, pvfF_u=pvfF_u, n_train=len(tr), n_unique=G)
 
 
 def run_scenario(name, keep, D, thr, seed=A.SEED):
@@ -81,13 +76,13 @@ def run_scenario(name, keep, D, thr, seed=A.SEED):
     ho = [p for p, k in zip(D["ho"], keep) if k]
     n = D["pvn"][keep]
     nF = D["pvnF"][keep]
-    src = np.array(["thm" if "THM_" in p else ("om_dr" if "/dr_frame" in p else "om_sr") for p in ho])
+    src = D["src"][keep]
     S = {"scenario": name, "n_healthy": len(n), "n_thm": int((src == "thm").sum()),
          "n_om": int((src != "thm").sum())}
     print(f"healthy frames kept: {len(n)}  (O&M {S['n_om']}, THM {S['n_thm']})")
 
     trs = set(D["tr"])
-    adj = sum(any(neighbour(p, d) in trs for d in (-1, 1)) for p in ho)
+    adj = sum(any(adjacent_frame(p, d) in trs for d in (-1, 1)) for p in ho)
     S["leak_adjacent"] = adj
     print(f"held-out healthy with an adjacent frame in TRAIN: {adj} / {len(ho)}")
 
@@ -141,7 +136,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     D = load_inputs()
     ho_names = [Path(p).name for p in D["ho"]]
-    is_thm = np.array(["THM_" in p for p in D["ho"]])
+    is_thm = D["src"] == "thm"
     screen = {r["frame"]: r for r in csv.DictReader(SCREEN.open(encoding="utf-8"))}
     flag = np.array([screen[f]["flag"] if f in screen else "n/a" for f in ho_names])
     hot = np.array([(screen[f]["hotspot"] == "yes") if f in screen else False for f in ho_names])

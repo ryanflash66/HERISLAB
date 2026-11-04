@@ -16,39 +16,17 @@ Quick-wins scope: visual side-by-side panels only. No mask-based IoU
 comparison this round (mask format needs investigation).
 """
 
-import os
 import numpy as np
-import torch
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-from pathlib import Path
 
-from train_autoencoder import ThermalAutoencoder
-from hlab.transform import denormalize, load_gray, normalize, to_model_input
+from hlab.bundle import Bundle
+from hlab.paths import DATA, RAW, RESULTS
+from hlab.transform import load_gray, to_model_input
 
 # --- Config ---
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data" / "CA_Preprocessed"
-TRAINING_DATA_DIR = ROOT / "data" / "CA_Training_Data"
-GT_DIR = ROOT / "data" / "ground_truth" / "induction_motor_40_gt" / "Subset_40_Thermal_GT"
-MODEL_DIR = ROOT / "models"
-OUT_DIR = ROOT / "results" / "heatmaps"
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def reconstruct(model, normed_batch):
-    """Run model forward pass, return per-pixel reconstruction + error.
-
-    normed_batch: (N, 240, 320) numpy
-    Returns: (recon_normed, per_pixel_err) both (N, 240, 320)
-    """
-    x = torch.from_numpy(normed_batch[:, np.newaxis, :, :]).float().to(DEVICE)
-    with torch.no_grad():
-        recon = model(x)
-    recon_np = recon.squeeze(1).cpu().numpy()
-    err = (normed_batch - recon_np) ** 2
-    return recon_np, err
+TRAINING_DATA_DIR = RAW
+GT_DIR = DATA / "ground_truth" / "induction_motor_40_gt" / "Subset_40_Thermal_GT"
+OUT_DIR = RESULTS / "heatmaps"
 
 
 def make_panel_row(ax_row, original, recon_denorm, error_map, title_prefix):
@@ -78,7 +56,7 @@ def make_panel_row(ax_row, original, recon_denorm, error_map, title_prefix):
     ax_row[3].axis("off")
 
 
-def make_grid(image_paths, model, stats, out_path, title, ncols_panel=4):
+def make_grid(image_paths, bundle, out_path, title, ncols_panel=4):
     """Build and save an N-row × 4-col grid of (orig | recon | err | overlay)."""
     n = len(image_paths)
     if n == 0:
@@ -87,9 +65,7 @@ def make_grid(image_paths, model, stats, out_path, title, ncols_panel=4):
 
     # Load + run inference in a single batch
     raws = np.stack([to_model_input(load_gray(p)) for p in image_paths])
-    normeds = normalize(raws, stats)
-    recons, errs = reconstruct(model, normeds)
-    recons_denorm = denormalize(recons, stats)
+    recons_denorm, errs = bundle.reconstruct(raws)
 
     # Plot
     fig, axes = plt.subplots(n, ncols_panel, figsize=(ncols_panel * 3, n * 2.2))
@@ -175,17 +151,11 @@ def collect_normal_samples(n=6):
 
 
 def main():
-    print(f"Device: {DEVICE}")
-
-    # Load norm stats
-    stats = np.load(DATA_DIR / "norm_stats.npy", allow_pickle=True).item()
-    print(f"Norm stats: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
-
-    # Load model
-    model = ThermalAutoencoder().to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_DIR / "autoencoder_best.pth", weights_only=True))
-    model.eval()
-    print("Loaded autoencoder_best.pth\n")
+    bundle = Bundle.load("v2")
+    print(f"Device: {bundle.device}")
+    print(f"Norm stats: mean={bundle.stats['mean']:.4f}, std={bundle.stats['std']:.4f}")
+    bundle.model
+    print(f"Loaded {bundle.weights.name}\n")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -193,7 +163,7 @@ def main():
     gt_files = collect_gt_motors()
     print(f"GT motors: {len(gt_files)} images")
     make_grid(
-        gt_files, model, stats,
+        gt_files, bundle,
         OUT_DIR / "gt_motors_grid.png",
         "Expert-annotated motor GTs -- reconstruction & error",
     )
@@ -202,7 +172,7 @@ def main():
     fault_files = collect_fault_samples(n_motor=6, n_transformer=6)
     print(f"\nFault samples: {len(fault_files)} images")
     make_grid(
-        fault_files, model, stats,
+        fault_files, bundle,
         OUT_DIR / "fault_samples_grid.png",
         "Fault samples (motor + transformer)",
     )
@@ -211,7 +181,7 @@ def main():
     normal_files = collect_normal_samples(n=6)
     print(f"\nNormal samples: {len(normal_files)} images")
     make_grid(
-        normal_files, model, stats,
+        normal_files, bundle,
         OUT_DIR / "normal_samples_grid.png",
         "Normal samples (sanity check -- error should be uniformly low)",
     )

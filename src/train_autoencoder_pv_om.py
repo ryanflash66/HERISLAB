@@ -17,8 +17,9 @@ Usage:
 """
 
 import train_autoencoder_pv as T
+from hlab.paths import PREPROCESSED
 
-DATA_DIR = T.ROOT / "data" / "CA_Preprocessed" / "pv_om"
+DATA_DIR = PREPROCESSED / "pv_om"
 BEST_PATH = T.MODEL_DIR / "autoencoder_pv_om_best.pth"
 FINAL_PATH = T.MODEL_DIR / "autoencoder_pv_om_final.pth"
 LOG_PATH = T.RESULTS_DIR / "training_log_pv_om.txt"
