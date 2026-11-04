@@ -1,9 +1,9 @@
 """
 HER-114 retrain: validity controls for the O&M-only PV specialist.
 
-Runs the same controls as audit_her114_reruns.py (metric code imported
-unchanged from audit_eval_validity.py) on the errors of the model trained
-WITHOUT the THM aerial-survey frames:
+Runs the same controls as audit_her114_reruns.py (metrics from hlab.metrics,
+features and baselines from audit_eval_validity.py) on the errors of the model
+trained WITHOUT the THM aerial-survey frames:
 
   split      data/CA_Preprocessed/pv_om/split_manifest.txt   (seed 42, O&M only)
   checkpoint models/autoencoder_pv_om_best.pth               (seed 43)
@@ -36,6 +36,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit_eval_validity as A  # noqa: E402
 import audit_her114_reruns as R  # noqa: E402
+from hlab.metrics import confusion, from_groups  # noqa: E402
 
 ROOT = A.ROOT
 PRE_OM = A.PRE / "pv_om"
@@ -81,23 +82,23 @@ def load_inputs():
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     M = np.load(A.RES / "pv_om_eval_metrics.npy", allow_pickle=True).item()
-    A.PV_THR = float(M["threshold"])  # run_scenario reads the threshold from here
+    thr = float(M["threshold"])
     buf = io.StringIO()
     with redirect_stdout(buf):
         print("=" * 70, "\nHER-114 retrain: O&M-only PV specialist\n" + "=" * 70)
         print(f"threshold used below ('saved threshold' in the printout) = re-tuned best-F1 "
-              f"threshold of the O&M-only model: {A.PV_THR:.6f}")
+              f"threshold of the O&M-only model: {thr:.6f}")
         D = load_inputs()
-        S = R.run_scenario("retrain_om_only", np.ones(len(D["ho"]), bool), D)
-        c = A.confusion(D["pvn"], D["pvf"], A.PV_THR)
-        print(f"\nre-tuned threshold {A.PV_THR:.6f}: {c}")
+        S = R.run_scenario("retrain_om_only", np.ones(len(D["ho"]), bool), D, thr)
+        c = A.rounded(confusion(*from_groups(D["pvn"], D["pvf"]), thr))
+        print(f"\nre-tuned threshold {thr:.6f}: {c}")
         print(f"THM flag rate at that threshold: all 1,075 frames {M['thm_flag_rate_all']:.1%}; "
               f"the 84 frames held out by the original split {M['thm_flag_rate_holdout84']:.1%}")
     txt = buf.getvalue()
     (OUT / "audit_retrain_om_only.txt").write_text(txt, encoding="utf-8")
     print(txt)
 
-    S["threshold"] = round(A.PV_THR, 6)
+    S["threshold"] = round(thr, 6)
     S["thm_flag_rate_holdout84"] = f"{M['thm_flag_rate_holdout84']:.1%}"
     S["thm_flag_rate_all"] = f"{M['thm_flag_rate_all']:.1%}"
     S["model"] = "O&M-only retrain (seed 43), 7,052 O&M train frames"

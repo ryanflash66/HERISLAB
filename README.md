@@ -116,6 +116,13 @@ python src/train_autoencoder.py
 python src/evaluate_autoencoder.py
 ```
 
+### Tests
+
+```bash
+venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+venv\Scripts\python.exe -m pytest tests
+```
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

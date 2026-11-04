@@ -4,9 +4,10 @@ Evaluate the PV-specialist autoencoder (HER-90).
 Loads the PV-specialist weights and scores them against the PV-only test
 split produced by src/preprocess_pv.py. That split is random per frame, so
 frames from the same video can sit in both train and test (not independent).
-Reuses the threshold calibration + AUROC helpers from evaluate_autoencoder.py,
-so the metric code is the same as the v2 baseline; the test sets and the
-preprocessing differ, so the numbers are not a like-for-like comparison.
+Reuses compute_reconstruction_errors / score_errors from evaluate_autoencoder.py
+(metrics from hlab.metrics), so the metric code is the same as the v2 baseline;
+the test sets and the preprocessing differ, so the numbers are not a
+like-for-like comparison.
 
 Inputs:
   models/autoencoder_pv_best.pth
@@ -28,11 +29,7 @@ import numpy as np
 import torch
 
 from train_autoencoder import ThermalAutoencoder
-from evaluate_autoencoder import (
-    compute_reconstruction_errors,
-    find_best_threshold,
-    compute_auroc,
-)
+from evaluate_autoencoder import compute_reconstruction_errors, print_metrics, score_errors
 
 ROOT = Path(__file__).resolve().parent.parent
 PV_DATA_DIR = ROOT / "data" / "CA_Preprocessed" / "pv"
@@ -115,19 +112,8 @@ def main():
         separation = fault_errors.mean() - normal_errors.mean()
         print(f"\n  Mean separation (fault - normal): {separation:.6f}")
 
-        auroc = compute_auroc(normal_errors, fault_errors)
-        print(f"  AUROC: {auroc:.4f}")
-
-        threshold, metrics = find_best_threshold(normal_errors, fault_errors)
-        print(f"\n  Best F1 threshold: {threshold:.6f}")
-        print(f"  Precision: {metrics['precision']:.4f}")
-        print(f"  Recall:    {metrics['recall']:.4f}")
-        print(f"  F1 Score:  {metrics['f1']:.4f}")
-        print(f"\n  Confusion matrix:")
-        print(f"    TP: {metrics['tp']:4d}  (faults correctly detected)")
-        print(f"    FP: {metrics['fp']:4d}  (normals wrongly flagged)")
-        print(f"    FN: {metrics['fn']:4d}  (faults missed)")
-        print(f"    TN: {metrics['tn']:4d}  (normals correctly passed)")
+        auroc, threshold, metrics = score_errors(normal_errors, fault_errors)
+        print_metrics(auroc, threshold, metrics)
 
         # v2 comparison
         print("\n  v2 baseline (for comparison):")
