@@ -23,14 +23,14 @@ lands.
 import os
 import random
 import numpy as np
-from PIL import Image
 from pathlib import Path
+
+from hlab.transform import load_gray, normalize, to_model_input
 
 # --- Config ---
 ROOT = Path(__file__).resolve().parent.parent
 INPUT_DIR = ROOT / "data" / "CA_Training_Data"
 OUTPUT_DIR = ROOT / "data" / "CA_Preprocessed" / "pv"
-TARGET_SIZE = (320, 240)   # width, height
 HOLDOUT_FRACTION = 0.10
 RANDOM_SEED = 42
 
@@ -41,31 +41,6 @@ PV_TRAIN_FOLDERS = [
 
 # Name of the fault subfolder under test/fault/. Waiting on HER-87.
 PV_TEST_FAULT_FOLDER = "pv"
-
-
-def load_image_raw(filepath):
-    """Load a single image as grayscale float32 scaled to 0-255.
-
-    Copies the steps of preprocess.py:load_image_raw (16-bit files min-max
-    stretched per image, 8-bit files passed through), so it carries the same
-    format gap between 16-bit and 8-bit sources (HER-107). Keep the two in
-    sync by hand; nothing enforces it.
-    """
-    img = Image.open(filepath)
-    arr = np.array(img, dtype=np.float32)
-
-    if arr.ndim == 3:
-        arr = arr.mean(axis=2)
-
-    if arr.max() > 255:
-        arr_min, arr_max = arr.min(), arr.max()
-        if arr_max > arr_min:
-            arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
-        else:
-            arr = np.zeros_like(arr)
-
-    img_resized = Image.fromarray(arr, mode="F").resize(TARGET_SIZE, Image.LANCZOS)
-    return np.array(img_resized, dtype=np.float32)
 
 
 def collect_files(folders, base_subpath):
@@ -84,13 +59,17 @@ def collect_files(folders, base_subpath):
 
 
 def load_arrays(paths, label):
-    """Load all arrays from (folder, path) tuples with progress."""
+    """Load all (folder, path) tuples as 0-255 model-input arrays, with progress.
+
+    Same transform as preprocess.py (hlab.transform, representation
+    "scale_by_max"), so the 16-bit / 8-bit format gap (HER-107) is shared, not copied.
+    """
     arrs = []
     skipped = 0
     total = len(paths)
     for i, (_folder, fpath) in enumerate(paths):
         try:
-            arrs.append(load_image_raw(fpath))
+            arrs.append(to_model_input(load_gray(fpath)))
         except Exception as e:
             print(f"  SKIP {fpath.name}: {e}")
             skipped += 1
@@ -143,6 +122,7 @@ def main():
 
     global_mean = float(train_arr.mean())
     global_std = float(train_arr.std())
+    stats = {"mean": global_mean, "std": global_std}
     print(f"\n  PV-only mean: {global_mean:.4f}")
     print(f"  PV-only std:  {global_std:.4f}")
     print(f"  (v2 global was mean=171.73, std=45.97 across all equipment)")
@@ -150,7 +130,7 @@ def main():
     # ---- Phase 3: z-score normalize and save train ----
     print("\nPhase 3: normalizing and saving train_normal...")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    train_normed = (train_arr - global_mean) / global_std
+    train_normed = normalize(train_arr, stats)
     np.save(OUTPUT_DIR / "train_normal.npy", train_normed.astype(np.float32))
     print(f"  Saved: {OUTPUT_DIR / 'train_normal.npy'}  shape {train_normed.shape}")
     del train_arrs, train_arr, train_normed
@@ -159,7 +139,7 @@ def main():
     print("\nPhase 4: loading + normalizing holdout test normals...")
     holdout_arrs, holdout_skipped = load_arrays(holdout_paths, "holdout")
     holdout_arr = np.stack(holdout_arrs, axis=0)
-    holdout_normed = (holdout_arr - global_mean) / global_std
+    holdout_normed = normalize(holdout_arr, stats)
     np.save(OUTPUT_DIR / "test_normal.npy", holdout_normed.astype(np.float32))
     print(f"  Saved: {OUTPUT_DIR / 'test_normal.npy'}  shape {holdout_normed.shape}  (skipped {holdout_skipped})")
     del holdout_arrs, holdout_arr, holdout_normed
@@ -172,7 +152,7 @@ def main():
         fault_arrs, fault_skipped = load_arrays(fault_files, "fault")
         if fault_arrs:
             fault_arr = np.stack(fault_arrs, axis=0)
-            fault_normed = (fault_arr - global_mean) / global_std
+            fault_normed = normalize(fault_arr, stats)
             np.save(OUTPUT_DIR / "test_fault.npy", fault_normed.astype(np.float32))
             print(f"  Saved: {OUTPUT_DIR / 'test_fault.npy'}  shape {fault_normed.shape}  (skipped {fault_skipped})")
         else:
@@ -184,7 +164,6 @@ def main():
         print("  rerun this script to produce test_fault.npy.")
 
     # ---- Phase 6: save PV-specific norm stats ----
-    stats = {"mean": global_mean, "std": global_std}
     stats_path = OUTPUT_DIR / "norm_stats.npy"
     np.save(stats_path, stats)
     print(f"\nSaved PV norm stats: {stats_path}")

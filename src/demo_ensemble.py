@@ -50,6 +50,7 @@ from matplotlib import patches as mpatches
 from PIL import Image
 
 from train_autoencoder import ThermalAutoencoder
+from hlab.transform import denormalize, load_gray, normalize, to_model_input
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "CA_Preprocessed"
@@ -57,7 +58,6 @@ TRAINING_DATA_DIR = ROOT / "data" / "CA_Training_Data"
 MODEL_DIR = ROOT / "models"
 RESULTS_DIR = ROOT / "results"
 OUT_DIR = RESULTS_DIR / "demo"
-TARGET_SIZE = (320, 240)
 # DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEVICE = torch.device("cpu")
 
@@ -123,27 +123,6 @@ def load_original_for_display(path):
             arr = arr[..., :3]
         return arr, "rgb"
     return arr.astype(np.float32), "mono"
-
-
-# --- Preprocessing (copy of the preprocess.py steps; keep in sync by hand) ---
-
-def load_image_for_inference(path, mean, std):
-    """Scale to 0-255, resize, then z-score normalize.
-
-    Returns: (raw_0_255 as (240,320), normed as (240,320))
-    """
-    img = Image.open(path)
-    arr = np.array(img, dtype=np.float32)
-    if arr.ndim == 3:
-        arr = arr.mean(axis=2)
-    if arr.max() > 255:
-        arr_min, arr_max = arr.min(), arr.max()
-        arr = (arr - arr_min) / (arr_max - arr_min) * 255.0 if arr_max > arr_min else np.zeros_like(arr)
-    img_resized = Image.fromarray(arr, mode="F").resize(TARGET_SIZE, Image.LANCZOS)
-    arr_resized = np.array(img_resized, dtype=np.float32)
-    raw = arr_resized.copy()
-    normed = (arr_resized - mean) / std
-    return raw, normed
 
 
 # --- ML path ---
@@ -637,10 +616,12 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
 
 # --- Main pipeline ---
 
-def run_one(path, equipment, expected, model, mean, std, idx, config):
-    raw, normed = load_image_for_inference(path, mean, std)
+def run_one(path, equipment, expected, model, stats, idx, config):
+    # Same transform as preprocessing (hlab.transform), so the model sees what it trained on.
+    raw = to_model_input(load_gray(path))
+    normed = normalize(raw, stats)
     recon_normed, err, mean_err = run_ml_inference(model, normed)
-    recon_denorm = recon_normed * std + mean
+    recon_denorm = denormalize(recon_normed, stats)
 
     ml, ml_reason = ml_verdict(mean_err)
     signal_c, signal_display = estimate_rule_signal(raw, equipment, config)
@@ -727,10 +708,9 @@ def main():
 
     # Norm stats + model
     stats = np.load(norm_stats_path, allow_pickle=True).item()
-    mean, std = stats["mean"], stats["std"]
     print(f"Device: {DEVICE}")
     print(f"Model:  {args.model} ({weights_path.name})")
-    print(f"Norm stats: mean={mean:.4f}, std={std:.4f}")
+    print(f"Norm stats: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
 
     model = ThermalAutoencoder().to(DEVICE)
     model.load_state_dict(torch.load(weights_path, weights_only=True))
@@ -742,14 +722,14 @@ def main():
         if not path.exists():
             print(f"ERROR: image not found: {path}")
             return 1
-        run_one(path, args.equipment, args.expected, model, mean, std, idx=1, config=config)
+        run_one(path, args.equipment, args.expected, model, stats, idx=1, config=config)
     else:
         print("Running curated sample set (4 images)...")
         for i, (path, equipment, expected) in enumerate(DEFAULT_SAMPLES, 1):
             if not path.exists():
                 print(f"  SKIP [{i}] {path}: not found")
                 continue
-            run_one(path, equipment, expected, model, mean, std, idx=i, config=config)
+            run_one(path, equipment, expected, model, stats, idx=i, config=config)
 
     print(f"\nVisualizations saved to: {OUT_DIR}/")
     return 0

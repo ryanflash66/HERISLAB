@@ -8,7 +8,8 @@ Approach:
   - Single-channel grayscale
   - 320x240 pixels (native motor image resolution)
   - All images brought to a common 0-255 numeric range first. This is NOT
-    camera-agnostic; the two branches differ (see load_image_raw):
+    camera-agnostic; the two branches differ (see hlab.transform.to_model_input,
+    representation "scale_by_max"):
       * 16-bit radiometric TIFFs: per-image min-max scaled to 0-255
       * 8-bit images: passed through unchanged
   - Then Z-score normalization using train-set global stats: (pixel - mean) / std
@@ -24,14 +25,14 @@ verified property.
 
 import os
 import numpy as np
-from PIL import Image
 from pathlib import Path
+
+from hlab.transform import load_gray, normalize, to_model_input
 
 # --- Config ---
 ROOT = Path(__file__).resolve().parent.parent
 INPUT_DIR = ROOT / "data" / "CA_Training_Data"
 OUTPUT_DIR = ROOT / "data" / "CA_Preprocessed"
-TARGET_SIZE = (320, 240)  # width, height
 
 # Exclude solar_modules: 24x40 images are too small
 TRAIN_FOLDERS = [
@@ -55,46 +56,8 @@ TEST_FAULT_FOLDERS = [
 ]
 
 
-def load_image_raw(filepath):
-    """Load a single image as grayscale float32 scaled to 0-255 range.
-
-    This gives every format the same numeric range. It does NOT make
-    different cameras comparable:
-      - 16-bit radiometric TIFFs (values like 6000-14000) are min-max
-        stretched per image to 0-255. This keeps contrast within the image
-        but discards absolute temperature, and lifts the dark end.
-      - 8-bit PNGs/BMPs/JPGs are passed through unchanged.
-    The two branches therefore produce different brightness distributions
-    (a source cue a model can exploit). See HER-107 and HER-82.
-    The branch is chosen from the image max (> 255), not file metadata.
-    """
-    img = Image.open(filepath)
-    arr = np.array(img, dtype=np.float32)
-
-    # Convert RGB/RGBA to grayscale by averaging channels
-    if arr.ndim == 3:
-        arr = arr.mean(axis=2)
-
-    # Scale to common 0-255 range based on source bit depth
-    if arr.max() > 255:
-        # 16-bit radiometric: min-max scale to 0-255
-        arr_min, arr_max = arr.min(), arr.max()
-        if arr_max > arr_min:
-            arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
-        else:
-            arr = np.zeros_like(arr)
-    # 8-bit images are already in 0-255, no conversion needed
-
-    # Resize to target using LANCZOS (high-quality resampling)
-    img_resized = Image.fromarray(arr, mode="F")
-    img_resized = img_resized.resize(TARGET_SIZE, Image.LANCZOS)
-    arr_resized = np.array(img_resized, dtype=np.float32)
-
-    return arr_resized
-
-
 def load_folder(input_folder):
-    """Load all images from a folder as raw arrays."""
+    """Load all images from a folder as 0-255 model-input arrays (not yet z-scored)."""
     images = []
     skipped = 0
 
@@ -108,8 +71,7 @@ def load_folder(input_folder):
         if not os.path.isfile(fpath):
             continue
         try:
-            img = load_image_raw(fpath)
-            images.append(img)
+            images.append(to_model_input(load_gray(fpath)))
         except Exception as e:
             print(f"  SKIP {fname}: {e}")
             skipped += 1
@@ -139,6 +101,7 @@ def main():
     train_arr = np.stack(train_images, axis=0)  # (N, 240, 320)
     global_mean = train_arr.mean()
     global_std = train_arr.std()
+    stats = {"mean": float(global_mean), "std": float(global_std)}
 
     print(f"\nTraining set: {train_arr.shape[0]} images")
     print(f"Global mean: {global_mean:.4f}")
@@ -149,7 +112,7 @@ def main():
     print("=" * 60)
 
     # Normalize and save training data
-    train_normalized = (train_arr - global_mean) / global_std
+    train_normalized = normalize(train_arr, stats)
     print(f"\nTrain normalized -- mean: {train_normalized.mean():.4f}, std: {train_normalized.std():.4f}")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -171,7 +134,7 @@ def main():
 
     if test_normal_images:
         test_normal_arr = np.stack(test_normal_images, axis=0)
-        test_normal_normalized = (test_normal_arr - global_mean) / global_std
+        test_normal_normalized = normalize(test_normal_arr, stats)
         print(f"Test/normal normalized -- mean: {test_normal_normalized.mean():.4f}, std: {test_normal_normalized.std():.4f}")
         np.save(OUTPUT_DIR / "test_normal.npy", test_normal_normalized.astype(np.float32))
         print(f"Saved: {OUTPUT_DIR / 'test_normal.npy'} -- shape {test_normal_normalized.shape}")
@@ -189,14 +152,13 @@ def main():
 
     if test_fault_images:
         test_fault_arr = np.stack(test_fault_images, axis=0)
-        test_fault_normalized = (test_fault_arr - global_mean) / global_std
+        test_fault_normalized = normalize(test_fault_arr, stats)
         print(f"Test/fault normalized -- mean: {test_fault_normalized.mean():.4f}, std: {test_fault_normalized.std():.4f}")
         np.save(OUTPUT_DIR / "test_fault.npy", test_fault_normalized.astype(np.float32))
         print(f"Saved: {OUTPUT_DIR / 'test_fault.npy'} -- shape {test_fault_normalized.shape}")
         del test_fault_arr, test_fault_images, test_fault_normalized
 
     # Save normalization stats for inference later
-    stats = {"mean": float(global_mean), "std": float(global_std)}
     stats_path = OUTPUT_DIR / "norm_stats.npy"
     np.save(stats_path, stats)
     print(f"\nSaved normalization stats: {stats_path}")
