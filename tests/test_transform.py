@@ -151,3 +151,65 @@ def test_normalize_denormalize_round_trip():
     z = T.normalize(x, stats)
     assert z.dtype == np.float32
     assert abs(float(z.mean())) < 1 and np.allclose(T.denormalize(z, stats), x, atol=1e-3)
+
+
+# ---------------------------------------------------------------- HER-107: crop fit and equalize
+@pytest.mark.parametrize("shape, kept", [
+    ((512, 640), (480, 640)),    # 5:4 radiometric frame: 16 rows off top and bottom
+    ((512, 512), (384, 512)),    # PVMD square: 64 rows off top and bottom
+    ((240, 400), (240, 320)),    # too wide: columns go
+    ((240, 320), (240, 320)),    # already 4:3: untouched
+])
+def test_crop_to_aspect_keeps_4_3_centre(shape, kept):
+    arr = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    out = T.crop_to_aspect(arr)
+    assert out.shape == kept
+    y0, x0 = (shape[0] - kept[0]) // 2, (shape[1] - kept[1]) // 2
+    assert np.array_equal(out, arr[y0:y0 + kept[0], x0:x0 + kept[1]])
+
+
+def test_crop_fit_does_not_squash():
+    """A centred disc stays round after crop + resize; stretch flattens it."""
+    yy, xx = np.mgrid[0:512, 0:512]
+    disc = (((yy - 256) ** 2 + (xx - 256) ** 2) < 100 ** 2).astype(np.float32) * 200
+    for fit, ratio in (("crop", 1.0), ("stretch", 240 / 512 / (320 / 512))):
+        out = T.to_model_input(disc, "minmax", fit=fit) > 127
+        rows, cols = np.where(out)
+        h, w = np.ptp(rows) + 1, np.ptp(cols) + 1
+        assert h / w == pytest.approx(ratio, abs=0.03), fit
+
+
+def test_stretch_is_the_default_fit():
+    raw16 = np.random.default_rng(3).integers(6000, 14000, (512, 640)).astype(np.uint16)
+    assert np.array_equal(T.to_model_input(raw16), T.to_model_input(raw16, fit="stretch"))
+    assert not np.array_equal(T.to_model_input(raw16), T.to_model_input(raw16, fit="crop"))
+
+
+def test_equalize_gives_the_same_flat_histogram_whatever_the_format():
+    """A 16-bit frame and an 8-bit render of the same scene come out identical up to ties."""
+    rng = np.random.default_rng(4)
+    scene = rng.normal(0, 1, (512, 640)).astype(np.float32)
+    raw16 = (9000 + 500 * scene).astype(np.float32)
+    dark8 = np.clip(40 + 10 * scene, 0, 255).astype(np.float32)       # dim 8-bit render, low p1
+    a = T.to_model_input(raw16, "equalize", fit="crop")
+    b = T.to_model_input(dark8, "equalize", fit="crop")
+    assert a.shape == b.shape == (240, 320) and a.dtype == np.float32
+    assert a.min() == 0.0 and a.max() == 255.0
+    for out in (a, b):
+        assert np.percentile(out, 1) == pytest.approx(2.55, abs=1.0)
+        assert out.mean() == pytest.approx(127.5, abs=0.5)
+    assert np.corrcoef(a.ravel(), b.ravel())[0, 1] > 0.95               # same order, same picture
+
+
+def test_equalize_is_order_only_and_handles_ties():
+    arr = np.kron(np.array([[1.0, 5.0], [5.0, 9.0]], np.float32), np.ones((120, 160), np.float32))
+    out = T.to_model_input(arr, "equalize")
+    assert out.min() >= 0 and out.max() <= 255
+    mono = T.to_model_input(np.exp(arr), "equalize")                    # any increasing map: same output
+    assert np.allclose(out, mono)
+    assert np.all(T.to_model_input(np.full((240, 320), 7.0), "equalize") == 127.5)   # flat: one tie
+
+
+def test_rejects_bad_fit():
+    with pytest.raises(ValueError):
+        T.to_model_input(np.zeros((240, 320)), fit="pad")

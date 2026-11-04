@@ -14,7 +14,9 @@ Datasets and what the preprocess scripts write for them (all under data/CA_Prepr
               source = equipment folder (electric_motor, induction_motor, transformer, pv_om_inspection, pv_thermal_inspection)
               manifest: split_manifest.txt when preprocess.py has written one; otherwise derived from the raw
               folders in the order preprocess.py reads them, checked against the array lengths
-  pv, pv_om   pv/ and pv_om/: train_normal.npy, test_normal.npy, test_fault.npy, norm_stats.npy, split_manifest.txt
+  pv, pv_om,  pv/, pv_om/, pv_matched/: train_normal.npy, test_normal.npy, test_fault.npy, norm_stats.npy,
+  pv_matched  split_manifest.txt (pv_matched: pv's frames and split, both classes cropped to 4:3 and
+              histogram-equalised, HER-107)
               splits: train, holdout, fault, test (holdout + fault, labelled)
               source = "om" | "thm" for healthy frames, "pvmd" for faults; meta carries the O&M sequence (dr / sr)
   india       india/: {train,val,test,cross_site}.npy + {split}_meta.csv (rel_path, label, plot, flight, t_*)
@@ -37,7 +39,8 @@ from PIL import Image, ImageOps
 from hlab.paths import PREPROCESSED, RAW, ROOT
 from hlab.transform import normalize
 
-NAMES = ("v2", "pv", "pv_om", "india", "india_temp")
+NAMES = ("v2", "pv", "pv_om", "pv_matched", "india", "india_temp")
+PV_NAMES = ("pv", "pv_om", "pv_matched")
 
 # The one declaration of which raw folders feed which split (preprocess.py / preprocess_pv.py read these).
 V2_FOLDERS = {
@@ -45,7 +48,8 @@ V2_FOLDERS = {
     "test_normal": ("electric_motor", "induction_motor", "transformer"),
     "test_fault": ("electric_motor", "induction_motor", "transformer"),
 }
-PV_FOLDERS = {"pv": ("pv_om_inspection", "pv_thermal_inspection"), "pv_om": ("pv_om_inspection",)}
+PV_FOLDERS = {"pv": ("pv_om_inspection", "pv_thermal_inspection"), "pv_om": ("pv_om_inspection",),
+              "pv_matched": ("pv_om_inspection", "pv_thermal_inspection")}
 PV_FAULT_FOLDER = "pv"                     # data/CA_Training_Data/test/fault/pv (PVMD)
 PV_SOURCE = {"pv_om_inspection": "om", "pv_thermal_inspection": "thm"}
 
@@ -203,7 +207,7 @@ class Dataset:
     def splits(self):
         if self.name == "v2":
             return ("train", "test_normal", "test_fault", "test")
-        if self.name in ("pv", "pv_om"):
+        if self.name in PV_NAMES:
             return ("train", "holdout", "fault", "test")
         return _INDIA_SPLITS
 
@@ -220,7 +224,7 @@ class Dataset:
         """Path of the stored array of `split` (degrees C for india_temp, model units elsewhere)."""
         if self.name == "v2":
             return self.dir / _V2_ARRAY[split]
-        if self.name in ("pv", "pv_om"):
+        if self.name in PV_NAMES:
             return self.dir / _PV_ARRAY[split]
         if split not in _INDIA_SPLITS:
             raise KeyError(split)
@@ -231,7 +235,7 @@ class Dataset:
         """[(frame_id, split, source), ...] for every frame the arrays hold, in array order."""
         if self.name == "v2":
             return self._v2_manifest()
-        if self.name in ("pv", "pv_om"):
+        if self.name in PV_NAMES:
             return self._pv_manifest()
         out = []
         for split in _INDIA_SPLITS:
@@ -279,7 +283,7 @@ class Dataset:
 
     # ---- splits ----
     def split(self, split):
-        if split == "test" and self.name in ("v2", "pv", "pv_om"):
+        if split == "test" and self.name in ("v2", *PV_NAMES):
             a, b = (self.split(s) for s in self._test_parts())
             return _concat("test", a, b)
         if split not in self.splits():
