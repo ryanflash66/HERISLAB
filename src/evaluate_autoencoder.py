@@ -1,5 +1,5 @@
 """
-Evaluate the trained autoencoder for anomaly detection (Track A).
+Evaluate the trained autoencoder for anomaly detection.
 
 Loads the v2 bundle (weights, norm stats), computes reconstruction error on
 the v2 test_normal and test_fault arrays, calibrates a threshold, and reports
