@@ -15,11 +15,12 @@ Checks:
   4. Trivial baselines: single global intensity statistics and a 5-fold
      logistic regression on 16 global statistics (no model)
   5. Headline metrics with bootstrap 95% CIs, on the full and deduplicated set
-  6. Rule layer: tier distribution and ensemble verdicts on the test sets
+  6. Rule layer: tier distribution and ensemble verdicts on the test sets,
+     through hlab.rules.evaluate per image (the same code as the demo)
 
 Metrics (AUROC, bootstrap CI, confusion, threshold search) come from
-src/hlab/metrics.py (HER-122); this file keeps feature extraction and the
-no-model baselines. Dependencies: numpy, Pillow (already in the project venv).
+src/hlab/metrics.py (HER-122) and the rule layer from src/hlab/rules.py
+(HER-124); this file keeps feature extraction and the no-model baselines. Dependencies: numpy, Pillow (already in the project venv).
 
 Usage:
     venv\\Scripts\\python.exe docs\\paper\\audit_eval_validity.py
@@ -37,6 +38,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion, from_groups, trivial_f1  # noqa: E402
+from hlab.rules import RuleConfig, combine, evaluate  # noqa: E402
+from hlab.transform import denormalize  # noqa: E402
 
 PRE = ROOT / "data" / "CA_Preprocessed"
 RAW = ROOT / "data" / "CA_Training_Data"
@@ -93,6 +96,23 @@ def global_features(arr_path, stats_path):
                      np.abs(np.diff(r, axis=1)).mean(), np.abs(np.diff(r, axis=0)).mean(),
                      lap, -(h[h > 0] * np.log2(h[h > 0])).sum()])
     return np.array(rows)
+
+
+def images_0_255(arr_path, stats_path, indices):
+    """De-normalised (0-255) images at `indices` of a stored z-scored array."""
+    st = np.load(stats_path, allow_pickle=True).item()
+    A = np.load(arr_path, mmap_mode="r")
+    return [denormalize(A[i], st) for i in indices]
+
+
+def rule_counts(config, images, equipment, ml_flags):
+    """Severity and ensemble counts over images, via hlab.rules (one implementation of the tiers)."""
+    sev, final = [], []
+    for img, ml in zip(images, ml_flags):
+        v = evaluate(config, img, equipment)
+        sev.append(v.severity)
+        final.append({"flag": "FLAG", "monitor": "MONITOR", "pass": "NORMAL"}[combine(bool(ml), v).action])
+    return dict(Counter(sev)), dict(Counter(final)), sum(s in ("ALARM", "CRITICAL") for s in sev)
 
 
 def read_manifest():
@@ -180,18 +200,20 @@ def main():
         print(f"{name}: best single statistics {[(k, round(v, 3)) for k, v in top]}")
         print(f"{name}: 5-fold logistic regression on 16 statistics AUROC {logreg_cv_auroc(a, b):.3f}")
 
-    print("\n" + "=" * 70, "\n6. Rule layer (config/thresholds_iec.json defaults)\n" + "=" * 70)
-    im, i95, imax = FEAT.index("mean"), FEAT.index("p95"), FEAT.index("max")
-    for name, F, e in [("PV healthy", pvnF, pvn), ("PV unique faults", pvfF_u, fu)]:
-        d = (F[:, i95] - F[:, im]) * 100 / 255
-        tier = np.select([d < 0, d < 15, d < 40, d < 75], ["OUT_OF_RANGE", "NORMAL", "WARNING", "ALARM"], "CRITICAL")
-        ml = e > PV_THR; rule = np.isin(tier, ["ALARM", "CRITICAL"])
-        final = np.where(ml | rule, "FLAG", np.where((tier == "WARNING") & ~ml, "MONITOR", "NORMAL"))
-        print(f"{name}: tiers {dict(Counter(tier.tolist()))}  ensemble {dict(Counter(final.tolist()))}")
-    for s, n_idx, f_idx in [("transformer", slice(33, 37), slice(452, 685))]:
-        for lab, F, e in [("healthy", gnF[n_idx], gn[n_idx]), ("fault", gfF[f_idx], gf[f_idx])]:
-            oil = 20 + F[:, imax] / 255 * 100 + 10
-            print(f"{s} {lab}: n={len(F)} AE flags {(e > V2_THR).sum()}  top-oil rule (>120 C) flags {(oil > 120).sum()}")
+    config = RuleConfig.load()
+    print("\n" + "=" * 70, f"\n6. Rule layer ({Path(config.source).relative_to(ROOT).as_posix()} defaults)\n" + "=" * 70)
+    unique_first = [int(np.flatnonzero(gid == g)[0]) for g in range(G)]
+    pv_stats = PRE / "pv" / "norm_stats.npy"
+    for name, imgs, e in [("PV healthy", images_0_255(PRE / "pv" / "test_normal.npy", pv_stats, range(len(pvn))), pvn),
+                          ("PV unique faults", images_0_255(PRE / "pv" / "test_fault.npy", pv_stats, unique_first), fu)]:
+        tiers, final, _ = rule_counts(config, imgs, "pv", e > PV_THR)
+        print(f"{name}: tiers {tiers}  ensemble {final}")
+    ceiling = float(config.ambient_c) + float(config.equipment("transformer")["ceiling_over_ambient_c"])
+    for s, n_idx, f_idx in [("transformer", range(33, 37), range(452, 685))]:
+        for lab, arr, idx, e in [("healthy", PRE / "test_normal.npy", n_idx, gn[list(n_idx)]),
+                                 ("fault", PRE / "test_fault.npy", f_idx, gf[list(f_idx)])]:
+            _, _, flagged = rule_counts(config, images_0_255(arr, PRE / "norm_stats.npy", idx), s, e > V2_THR)
+            print(f"{s} {lab}: n={len(e)} AE flags {(e > V2_THR).sum()}  top-oil rule (>{ceiling:.0f} C) flags {flagged}")
 
 
 if __name__ == "__main__":
