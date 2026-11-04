@@ -22,9 +22,9 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from pathlib import Path
-from PIL import Image
 
 from train_autoencoder import ThermalAutoencoder
+from hlab.transform import denormalize, load_gray, normalize, to_model_input
 
 # --- Config ---
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,32 +33,8 @@ TRAINING_DATA_DIR = ROOT / "data" / "CA_Training_Data"
 GT_DIR = ROOT / "data" / "ground_truth" / "induction_motor_40_gt" / "Subset_40_Thermal_GT"
 MODEL_DIR = ROOT / "models"
 OUT_DIR = ROOT / "results" / "heatmaps"
-TARGET_SIZE = (320, 240)  # width, height — matches preprocess.py
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def load_image_for_inference(path, mean, std):
-    """Load a raw image, scale to 0-255, resize, then z-score normalize.
-
-    Mirrors preprocess.py:load_image_raw + z-score step so heatmaps
-    reflect what the model actually saw at training time.
-    """
-    img = Image.open(path)
-    arr = np.array(img, dtype=np.float32)
-    if arr.ndim == 3:
-        arr = arr.mean(axis=2)
-    if arr.max() > 255:
-        arr_min, arr_max = arr.min(), arr.max()
-        if arr_max > arr_min:
-            arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
-        else:
-            arr = np.zeros_like(arr)
-    img_resized = Image.fromarray(arr, mode="F").resize(TARGET_SIZE, Image.LANCZOS)
-    arr_resized = np.array(img_resized, dtype=np.float32)
-    raw_0_255 = arr_resized.copy()
-    normed = (arr_resized - mean) / std
-    return raw_0_255, normed
 
 
 def reconstruct(model, normed_batch):
@@ -73,11 +49,6 @@ def reconstruct(model, normed_batch):
     recon_np = recon.squeeze(1).cpu().numpy()
     err = (normed_batch - recon_np) ** 2
     return recon_np, err
-
-
-def denorm(arr_normed, mean, std):
-    """Reverse z-score back to 0-255 range for display."""
-    return arr_normed * std + mean
 
 
 def make_panel_row(ax_row, original, recon_denorm, error_map, title_prefix):
@@ -107,7 +78,7 @@ def make_panel_row(ax_row, original, recon_denorm, error_map, title_prefix):
     ax_row[3].axis("off")
 
 
-def make_grid(image_paths, model, mean, std, out_path, title, ncols_panel=4):
+def make_grid(image_paths, model, stats, out_path, title, ncols_panel=4):
     """Build and save an N-row × 4-col grid of (orig | recon | err | overlay)."""
     n = len(image_paths)
     if n == 0:
@@ -115,15 +86,10 @@ def make_grid(image_paths, model, mean, std, out_path, title, ncols_panel=4):
         return
 
     # Load + run inference in a single batch
-    raws, normeds = [], []
-    for p in image_paths:
-        raw, normed = load_image_for_inference(p, mean, std)
-        raws.append(raw)
-        normeds.append(normed)
-    raws = np.stack(raws)
-    normeds = np.stack(normeds)
+    raws = np.stack([to_model_input(load_gray(p)) for p in image_paths])
+    normeds = normalize(raws, stats)
     recons, errs = reconstruct(model, normeds)
-    recons_denorm = denorm(recons, mean, std)
+    recons_denorm = denormalize(recons, stats)
 
     # Plot
     fig, axes = plt.subplots(n, ncols_panel, figsize=(ncols_panel * 3, n * 2.2))
@@ -213,8 +179,7 @@ def main():
 
     # Load norm stats
     stats = np.load(DATA_DIR / "norm_stats.npy", allow_pickle=True).item()
-    mean, std = stats["mean"], stats["std"]
-    print(f"Norm stats: mean={mean:.4f}, std={std:.4f}")
+    print(f"Norm stats: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
 
     # Load model
     model = ThermalAutoencoder().to(DEVICE)
@@ -228,7 +193,7 @@ def main():
     gt_files = collect_gt_motors()
     print(f"GT motors: {len(gt_files)} images")
     make_grid(
-        gt_files, model, mean, std,
+        gt_files, model, stats,
         OUT_DIR / "gt_motors_grid.png",
         "Expert-annotated motor GTs -- reconstruction & error",
     )
@@ -237,7 +202,7 @@ def main():
     fault_files = collect_fault_samples(n_motor=6, n_transformer=6)
     print(f"\nFault samples: {len(fault_files)} images")
     make_grid(
-        fault_files, model, mean, std,
+        fault_files, model, stats,
         OUT_DIR / "fault_samples_grid.png",
         "Fault samples (motor + transformer)",
     )
@@ -246,7 +211,7 @@ def main():
     normal_files = collect_normal_samples(n=6)
     print(f"\nNormal samples: {len(normal_files)} images")
     make_grid(
-        normal_files, model, mean, std,
+        normal_files, model, stats,
         OUT_DIR / "normal_samples_grid.png",
         "Normal samples (sanity check -- error should be uniformly low)",
     )

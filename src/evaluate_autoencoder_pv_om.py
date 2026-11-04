@@ -32,7 +32,7 @@ import torch
 from train_autoencoder import ThermalAutoencoder
 from evaluate_autoencoder import compute_reconstruction_errors, score_errors
 from hlab.metrics import confusion, from_groups
-from preprocess_pv import load_image_raw
+from hlab.transform import load_gray, normalize, to_model_input
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "CA_Preprocessed" / "pv_om"
@@ -111,11 +111,11 @@ def main():
         thm_files = sorted(p for p in THM_DIR.iterdir() if p.is_file())
         arrs = []
         for i, p in enumerate(thm_files):
-            arrs.append(load_image_raw(p))
+            arrs.append(to_model_input(load_gray(p)))
             if (i + 1) % 250 == 0 or i + 1 == len(thm_files):
                 print(f"    loaded {i + 1}/{len(thm_files)}")
-        thm = (np.stack(arrs) - stats["mean"]) / stats["std"]
-        thm_errors = compute_reconstruction_errors(model, thm.astype(np.float32))
+        thm = normalize(np.stack(arrs), stats)
+        thm_errors = compute_reconstruction_errors(model, thm)
         ho_names = original_holdout_thm()
         split = np.array(["holdout" if p.name in ho_names else "train" for p in thm_files])
         flagged = thm_errors > threshold

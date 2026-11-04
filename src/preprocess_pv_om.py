@@ -29,7 +29,7 @@ def main():
     assert OUTPUT_DIR != ORIGINAL_DIR
     P.OUTPUT_DIR = OUTPUT_DIR
     P.PV_TRAIN_FOLDERS = ["pv_om_inspection"]
-    # RANDOM_SEED (42), HOLDOUT_FRACTION (0.10), TARGET_SIZE and the loaders
+    # RANDOM_SEED (42), HOLDOUT_FRACTION (0.10) and the loaders (hlab.transform)
     # are inherited unchanged from preprocess_pv.
     print(f"O&M-only variant: folders={P.PV_TRAIN_FOLDERS}, seed={P.RANDOM_SEED}, "
           f"holdout={P.HOLDOUT_FRACTION:.0%}, out={OUTPUT_DIR}")
