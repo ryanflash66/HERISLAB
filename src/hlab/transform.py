@@ -20,8 +20,13 @@ Representations of ``to_model_input``:
   "minmax"        always min-max stretch to 0-255 (India radiometric frames)
   "celsius"       clip to 0-120 degrees C, no rescale (India temperature frames)
 
-Resizing is LANCZOS on a float image, width x height = TARGET_SIZE. Nothing here
-reads the data layout or the stats files; callers pass the stats dict.
+Resizing is LANCZOS on a float image, width x height = TARGET_SIZE, applied after
+the range step in every representation. LANCZOS rings at sharp edges, so a
+resized array can overshoot its range by a little (a 16-bit frame slightly
+outside 0-255, a Celsius frame slightly outside 0-120); the stored
+CA_Preprocessed arrays carry that overshoot, and the order is kept so they can
+be reproduced exactly. Nothing here reads the data layout or the stats files;
+callers pass the stats dict.
 """
 import numpy as np
 from PIL import Image
