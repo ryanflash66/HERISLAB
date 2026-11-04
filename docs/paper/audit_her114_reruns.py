@@ -4,8 +4,8 @@ removed or screened.
 
 Nothing is retrained and the split is untouched: the PV specialist checkpoint,
 the seed-42 split (src/preprocess_pv.py) and the seed-43 training run are the
-same ones behind results/pv_*_errors.npy. Each scenario only changes WHICH
-held-out healthy frames are counted at evaluation time:
+same ones behind results/pv_*_errors.npy. Each scenario is a keep-mask over the
+held-out healthy frames, run through audit.run_scenario:
 
   a  as is                        892 healthy (808 O&M + 84 THM)
   b  THM removed                  808 O&M only
@@ -37,138 +37,51 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import audit_eval_validity as A  # noqa: E402  (puts src/ on sys.path)
-from hlab.datasets import Dataset, adjacent_frame, pvmd_unique_groups  # noqa: E402
-from hlab.metrics import auroc, auroc_ci, confusion, from_groups, trivial_f1  # noqa: E402
-from hlab.paths import MANIFESTS  # noqa: E402
+from audit import PVInputs, print_scenario, run_scenario, write_summary  # noqa: E402  (puts src/ on sys.path)
+from hlab.bundle import Bundle  # noqa: E402
+from hlab.datasets import Dataset  # noqa: E402
+from hlab.paths import MANIFESTS, RESULTS  # noqa: E402
 
-ROOT = A.ROOT
-OUT = A.RES / "her-114"
+OUT = RESULTS / "her-114"
 SCREEN = MANIFESTS / "thm_screened_frames.csv"
+COLS = ["scenario", "n_healthy", "n_thm", "auroc_files", "auroc_files_ci", "auroc_unique", "auroc_unique_ci",
+        "fp_files", "fp_thm", "fp_share_thm", "f1_saved_files", "f1_trivial_files", "f1_trivial_unique",
+        "auroc_source", "auroc_source_def", "p1_baseline", "best_single", "logreg16", "leak_adjacent"]
 
 
-def source_labels(split):
-    """'thm' | 'om_dr' | 'om_sr' per healthy frame."""
-    return np.array([s if s == "thm" else f"om_{m['sequence']}" for s, m in zip(split.source, split.meta)])
-
-
-def load_inputs(dataset=None, errors_prefix="pv"):
-    """Holdout frames, saved errors and global features of one PV dataset ("pv" or "pv_om")."""
-    ds = dataset or Dataset("pv")
-    files, gid, groups = pvmd_unique_groups()
-    G = len(groups)
-    holdout, fault = ds.split("holdout"), ds.split("fault")
-    tr = [f for f, split, _src in ds.manifest() if split == "train"]
-    pvn = np.load(A.RES / f"{errors_prefix}_normal_errors.npy")
-    pvf = np.load(A.RES / f"{errors_prefix}_fault_errors.npy")
-    assert len(pvn) == len(holdout) and len(pvf) == len(files) == 1000, (len(pvn), len(holdout), len(pvf))
-    fu = np.array([pvf[gid == g].mean() for g in range(G)])
-    print("Computing global image statistics (no model)...")
-    pvnF = A.global_features(holdout.x, ds.stats)
-    pvfF = A.global_features(fault.x, ds.stats)
-    pvfF_u = np.array([pvfF[gid == g][0] for g in range(G)])
-    return dict(tr=tr, ho=holdout.frame_ids, src=source_labels(holdout), pvn=pvn, pvf=pvf, fu=fu,
-                pvnF=pvnF, pvfF_u=pvfF_u, n_train=len(tr), n_unique=G)
-
-
-def run_scenario(name, keep, D, thr, seed=A.SEED):
-    """keep: boolean mask over the held-out healthy frames; thr: saved threshold of the model under test."""
-    ho = [p for p, k in zip(D["ho"], keep) if k]
-    n = D["pvn"][keep]
-    nF = D["pvnF"][keep]
-    src = D["src"][keep]
-    S = {"scenario": name, "n_healthy": len(n), "n_thm": int((src == "thm").sum()),
-         "n_om": int((src != "thm").sum())}
-    print(f"healthy frames kept: {len(n)}  (O&M {S['n_om']}, THM {S['n_thm']})")
-
-    trs = set(D["tr"])
-    adj = sum(any(adjacent_frame(p, d) in trs for d in (-1, 1)) for p in ho)
-    S["leak_adjacent"] = adj
-    print(f"held-out healthy with an adjacent frame in TRAIN: {adj} / {len(ho)}")
-
-    for lab, f in [("1000 files", D["pvf"]), ("140 unique", D["fu"])]:
-        s, y = from_groups(n, f)
-        au = auroc(s, y); lo, hi = auroc_ci(s, y, seed=seed)
-        triv = trivial_f1(y)
-        c = A.rounded(confusion(s, y, thr))
-        print(f"\n{lab}: AUROC {au:.4f} [{lo:.3f}, {hi:.3f}]  flag-everything F1 {triv:.4f}")
-        print("  at saved threshold:", c)
-        key = "files" if lab == "1000 files" else "unique"
-        S[f"auroc_{key}"] = round(au, 4); S[f"auroc_{key}_ci"] = f"[{lo:.3f}, {hi:.3f}]"
-        S[f"f1_trivial_{key}"] = round(triv, 4); S[f"f1_saved_{key}"] = c["f1"]
-        S[f"fp_{key}"] = c["fp"]; S[f"recall_{key}"] = c["recall"]; S[f"precision_{key}"] = c["precision"]
-
-    flagged = n > thr
-    fp_thm = int((flagged & (src == "thm")).sum()); fp_om = int((flagged & (src != "thm")).sum())
-    S["fp_thm"] = fp_thm; S["fp_om"] = fp_om
-    S["fp_share_thm"] = round(fp_thm / max(fp_thm + fp_om, 1), 3)
-    print(f"\nfalse positives at saved threshold: THM {fp_thm} / {S['n_thm']}   O&M {fp_om} / {S['n_om']}"
-          f"   THM share {S['fp_share_thm']:.1%}")
-    for s in ("om_dr", "om_sr", "thm"):
-        e = n[src == s]
-        if len(e):
-            print(f"  {s:5s}: n={len(e):4d}  median err {np.median(e):.4f}  flagged {(e > thr).sum()}")
-
-    om = n[src != "thm"]; thm = n[src == "thm"]
-    if len(thm):
-        S["auroc_source"] = round(auroc(*from_groups(om, thm)), 3); S["auroc_source_def"] = "healthy O&M vs healthy THM"
-    else:
-        S["auroc_source"] = round(auroc(*from_groups(n[src == "om_dr"], n[src == "om_sr"])), 3)
-        S["auroc_source_def"] = "healthy O&M sequence dr vs sr"
-    print(f"source AUROC ({S['auroc_source_def']}): {S['auroc_source']}")
-    print(f"AUROC healthy O&M vs unique fault: {auroc(*from_groups(om, D['fu'])):.3f}")
-    if len(thm):
-        print(f"AUROC healthy THM vs unique fault: {auroc(*from_groups(thm, D['fu'])):.3f}")
-
-    aj = [auroc(*from_groups(nF[:, j], D["pvfF_u"][:, j])) for j in range(len(A.FEAT))]
-    single = {k: max(v, 1 - v) for k, v in zip(A.FEAT, aj)}
-    top = sorted(single.items(), key=lambda kv: -kv[1])[:3]
-    S["p1_baseline"] = round(float(single["p1"]), 3)
-    S["best_single"] = f"{top[0][0]} {top[0][1]:.3f}"
-    print(f"single-statistic AUROC (unique faults): p1 = {single['p1']:.3f}; best {[(k, round(v, 3)) for k, v in top]}")
-    lr = A.logreg_cv_auroc(nF, D["pvfF_u"], seed=seed)
-    S["logreg16"] = round(float(lr), 3)
-    print(f"5-fold logistic regression on 16 statistics: AUROC {lr:.3f}")
-    return S
-
-
-def main():
-    OUT.mkdir(parents=True, exist_ok=True)
-    D = load_inputs()
-    ho_names = [Path(p).name for p in D["ho"]]
-    is_thm = D["src"] == "thm"
+def scenarios(D):
+    """(name, keep-mask over the held-out healthy frames) for the five HER-114 scenarios."""
+    ho_names = [Path(p).name for p in D.ho]
+    is_thm = D.seq == "thm"
     screen = {r["frame"]: r for r in csv.DictReader(SCREEN.open(encoding="utf-8"))}
     flag = np.array([screen[f]["flag"] if f in screen else "n/a" for f in ho_names])
     hot = np.array([(screen[f]["hotspot"] == "yes") if f in screen else False for f in ho_names])
-    scenarios = [
+    return [
         ("a_as_is", np.ones(len(ho_names), bool)),
         ("b_thm_removed", ~is_thm),
         ("c_flagged_thm_removed", ~is_thm | (flag != "drop")),
         ("c2_hotspot_thm_removed", ~is_thm | ~hot),
         ("c3_strict_keep_only", ~is_thm | (flag == "keep")),
     ]
+
+
+def main():
+    OUT.mkdir(parents=True, exist_ok=True)
+    pv = Bundle.load("pv")
+    D = PVInputs(Dataset("pv"), pv)
+    print("Computing global image statistics (no model)...")
+    D.features()
     rows = []
-    for name, keep in scenarios:
+    for name, keep in scenarios(D):
         buf = io.StringIO()
         with redirect_stdout(buf):
             print("=" * 70, f"\nHER-114 rerun {name}\n" + "=" * 70)
-            S = run_scenario(name, keep, D, A.PV_THR)
+            S = run_scenario(name, keep, D, pv.require_threshold())
+            print_scenario(S)
         (OUT / f"rerun_{name}.txt").write_text(buf.getvalue(), encoding="utf-8")
         print(buf.getvalue())
         rows.append(S)
-
-    cols = ["scenario", "n_healthy", "n_thm", "auroc_files", "auroc_files_ci", "auroc_unique", "auroc_unique_ci",
-            "fp_files", "fp_thm", "fp_share_thm", "f1_saved_files", "f1_trivial_files", "f1_trivial_unique",
-            "auroc_source", "auroc_source_def", "p1_baseline", "best_single", "logreg16", "leak_adjacent"]
-    md = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
-    for S in rows:
-        md.append("| " + " | ".join(str(S.get(c, "")) for c in cols) + " |")
-    (OUT / "rerun_summary.md").write_text("\n".join(md) + "\n", encoding="utf-8")
-    with (OUT / "rerun_summary.csv").open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols); w.writeheader()
-        for S in rows:
-            w.writerow({c: S.get(c, "") for c in cols})
-    print("\n".join(md))
+    print(write_summary(rows, COLS, OUT / "rerun_summary.md", OUT / "rerun_summary.csv"))
 
 
 if __name__ == "__main__":
