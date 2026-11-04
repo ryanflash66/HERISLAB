@@ -1,4 +1,4 @@
-"""Tests for the rule layer and its JSON threshold config.
+"""Tests for hlab.rules, the rule layer and its JSON threshold config.
 
 The bulk of these are golden-master tests: `legacy_*` below are verbatim copies
 of the hardcoded rule logic as it stood before thresholds were externalized.
@@ -7,24 +7,21 @@ shipped IEC defaults must reproduce the old behavior exactly -- same severity,
 same explanation string, character for character.
 
 Run:
-  venv/Scripts/python.exe -m unittest discover -s tests -v
+  venv/Scripts/python.exe -m pytest tests
 """
 
 import json
-import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("MPLBACKEND", "Agg")  # no display in CI / headless runs
+import numpy as np
+
+from hlab import rules as de
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-
-import numpy as np  # noqa: E402
-
-import demo_ensemble as de  # noqa: E402
 
 
 # --- Legacy implementation (pre-refactor, hardcoded) ---
@@ -157,7 +154,7 @@ def write_config(directory, config, name="thresholds.json"):
 
 def default_config_dict():
     """Fresh parse of the shipped defaults, safe to mutate."""
-    return json.loads(de.DEFAULT_THRESHOLD_CONFIG.read_text(encoding="utf-8"))
+    return json.loads(de.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
 
 
 class TestShippedDefaults(unittest.TestCase):
@@ -165,12 +162,13 @@ class TestShippedDefaults(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.config = de.load_threshold_config()
+        cls.config = de.RuleConfig.load()
 
     def test_default_config_file_exists_and_loads(self):
-        self.assertTrue(de.DEFAULT_THRESHOLD_CONFIG.exists())
-        self.assertEqual(self.config["_source"], str(de.DEFAULT_THRESHOLD_CONFIG))
+        self.assertTrue(de.DEFAULT_CONFIG_PATH.exists())
+        self.assertEqual(self.config.source, str(de.DEFAULT_CONFIG_PATH))
         self.assertIn("name", self.config)
+        self.assertEqual(self.config.name, "IEC / manufacturer defaults")
 
     def test_global_constants_match_legacy(self):
         self.assertEqual(self.config["ambient_c"], LEGACY_AMBIENT_C)
@@ -180,7 +178,7 @@ class TestShippedDefaults(unittest.TestCase):
         self.assertEqual(camera["pixel_max"], 255.0)
 
     def test_transformer_block_matches_legacy(self):
-        eq_cfg = de.equipment_config(self.config, "transformer")
+        eq_cfg = self.config.equipment("transformer")
         self.assertEqual(eq_cfg["type"], "top_oil")
         self.assertEqual(eq_cfg["surface_offset_c"], LEGACY_TRANSFORMER_SURFACE_OFFSET_C)
         # Legacy baked ceiling_c = AMBIENT_C + 85.0 at import time.
@@ -190,7 +188,7 @@ class TestShippedDefaults(unittest.TestCase):
         )
 
     def test_pv_block_matches_legacy(self):
-        eq_cfg = de.equipment_config(self.config, "pv")
+        eq_cfg = self.config.equipment("pv")
         self.assertEqual(eq_cfg["type"], "hotspot_delta")
         self.assertEqual(eq_cfg["percentile"], 95)
         self.assertEqual(eq_cfg["delta_span_c"], 100.0)
@@ -209,7 +207,7 @@ class TestBehaviorMatchesLegacy(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.config = de.load_threshold_config()
+        cls.config = de.RuleConfig.load()
 
     def test_transformer_signal_matches_legacy(self):
         for arr in TRANSFORMER_IMAGES:
@@ -272,10 +270,8 @@ class TestBehaviorMatchesLegacy(unittest.TestCase):
         for ml in ("FAULT", "NORMAL"):
             for rule in sorted(de.SEVERITY_REGISTRY):
                 with self.subTest(ml=ml, rule=rule):
-                    self.assertEqual(
-                        de.ensemble_decision(ml, rule),
-                        legacy_ensemble_decision(ml, rule),
-                    )
+                    got = de.decide(ml == "FAULT", rule)
+                    self.assertEqual((got.label, got.color), legacy_ensemble_decision(ml, rule))
 
     def test_severity_colors_match_legacy_color_map(self):
         legacy_color_map = {
@@ -292,7 +288,7 @@ class TestBehaviorMatchesLegacy(unittest.TestCase):
         config = default_config_dict()
         config["equipment"]["transformer"]["surface_offset_c"] = 25.0
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             _severity, explanation = de.rule_verdict(80.0, "transformer", loaded)
         self.assertIn("+ 25°C offset", explanation)
         self.assertNotIn("+ 10°C offset", explanation)
@@ -304,18 +300,18 @@ class TestFailLoud(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.config = de.load_threshold_config()
+        cls.config = de.RuleConfig.load()
 
     def test_unknown_severity_raises(self):
         with self.assertRaises(ValueError) as ctx:
-            de.ensemble_decision("NORMAL", "ALERT")
+            de.decide(False, "ALERT")
         self.assertIn("unknown severity", str(ctx.exception))
         # Legacy silently treated this as not-flagged -- the bug being fixed.
         self.assertEqual(legacy_ensemble_decision("NORMAL", "ALERT")[0], "NORMAL")
 
     def test_unknown_severity_raises_even_when_ml_flags(self):
         with self.assertRaises(ValueError):
-            de.ensemble_decision("FAULT", "ALERT")
+            de.decide(True, "ALERT")
 
     def test_severity_color_raises_on_unknown(self):
         with self.assertRaises(ValueError):
@@ -345,7 +341,7 @@ class TestFailLoud(unittest.TestCase):
             {"severity": "normal", "min_c": 0, "max_c": 15},
         ]
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             severity, explanation = de.rule_verdict(50.0, "pv", loaded)
         self.assertEqual(severity, "OUT_OF_RANGE")
         # Legacy's out-of-range wording, verbatim. (Not compared against
@@ -353,18 +349,18 @@ class TestFailLoud(unittest.TestCase):
         # -- it is only uncovered by this deliberately truncated config.)
         self.assertEqual(explanation, "Hot-spot ΔT proxy 50.0°C outside all tiers")
         self.assertEqual(de.severity_action(severity), "pass")
-        self.assertEqual(de.ensemble_decision("NORMAL", severity)[0], "NORMAL")
+        self.assertEqual(de.decide(False, severity).label, "NORMAL")
 
     def test_missing_config_file_raises(self):
         with self.assertRaises(FileNotFoundError):
-            de.load_threshold_config(ROOT / "config" / "does_not_exist.json")
+            de.RuleConfig.load(ROOT / "config" / "does_not_exist.json")
 
     def test_malformed_json_raises_valueerror(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.json"
             path.write_text("{not json", encoding="utf-8")
             with self.assertRaises(ValueError) as ctx:
-                de.load_threshold_config(path)
+                de.RuleConfig.load(path)
         self.assertIn("not valid JSON", str(ctx.exception))
 
 
@@ -375,7 +371,7 @@ class TestConfigValidation(unittest.TestCase):
         config = default_config_dict()
         mutate(config)
         with tempfile.TemporaryDirectory() as tmp:
-            return de.load_threshold_config(write_config(tmp, config))
+            return de.RuleConfig.load(write_config(tmp, config))
 
     def assert_rejected(self, mutate, *expected_fragments):
         with self.assertRaises(ValueError) as ctx:
@@ -450,7 +446,7 @@ class TestScadaSwap(unittest.TestCase):
         del transformer["ceiling_over_ambient_c"]
         transformer["ceiling_c"] = 90.0
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             # surface 85 + 10 offset = 95: under the IEC 120 ceiling, over a 90 setpoint.
             severity, explanation = de.rule_verdict(85.0, "transformer", loaded)
         self.assertEqual(severity, "CRITICAL")
@@ -461,7 +457,7 @@ class TestScadaSwap(unittest.TestCase):
         config = default_config_dict()
         config["ambient_c"] = 10.0  # winter site: ceiling becomes 95
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             severity, explanation = de.rule_verdict(90.0, "transformer", loaded)
         self.assertEqual(severity, "CRITICAL")
         self.assertIn("ceiling 95°C", explanation)
@@ -474,7 +470,7 @@ class TestScadaSwap(unittest.TestCase):
             {"severity": "critical", "min_c": 10, "max_c": 999},
         ]
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             severity, _ = de.rule_verdict(12.0, "pv", loaded)
         self.assertEqual(severity, "CRITICAL")
         # Same signal under IEC defaults is merely 'normal' (tier 0-15).
@@ -489,7 +485,7 @@ class TestScadaSwap(unittest.TestCase):
             "ceiling_c": 75.0,
         }
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             signal_c, display = de.estimate_rule_signal(
                 image_with_max(255), "breaker", loaded
             )
@@ -504,12 +500,77 @@ class TestScadaSwap(unittest.TestCase):
         config["equipment"]["pv"]["percentile"] = 99
         config["equipment"]["pv"]["delta_span_c"] = 255.0  # 1:1 pixel -> degC
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = de.load_threshold_config(write_config(tmp, config))
+            loaded = de.RuleConfig.load(write_config(tmp, config))
             arr = image_with_hotspot(50, 200, 0.05)
             signal_c, display = de.estimate_rule_signal(arr, "pv", loaded)
         expected = float(np.percentile(arr, 99)) - float(arr.mean())
         self.assertAlmostEqual(signal_c, expected, places=10)
         self.assertIn("p99", display["extra"])
+
+
+class TestDeepInterface(unittest.TestCase):
+    """HER-124: evaluate + combine are the interface; the two-step path is an internal seam."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = de.RuleConfig.load()
+
+    def test_combine_truth_table_with_boolean(self):
+        for ml_flagged in (True, False):
+            for severity in sorted(de.SEVERITY_REGISTRY):
+                verdict = de.RuleVerdict(severity, de.severity_action(severity), de.severity_color(severity),
+                                         0.0, "", {})
+                with self.subTest(ml_flagged=ml_flagged, severity=severity):
+                    got = de.combine(ml_flagged, verdict)
+                    want = legacy_ensemble_decision("FAULT" if ml_flagged else "NORMAL", severity)
+                    self.assertEqual((got.label, got.color), want)
+                    self.assertEqual(got.action, {"FLAGGED (both layers)": "flag", "FLAGGED (ML only)": "flag",
+                                                  "FLAGGED (rules only)": "flag", "MONITOR (warning tier)": "monitor",
+                                                  "NORMAL": "pass"}[got.label])
+
+    def test_evaluate_equals_two_step_path(self):
+        for equipment, images in (("transformer", TRANSFORMER_IMAGES), ("pv", PV_IMAGES)):
+            for arr in images:
+                with self.subTest(equipment=equipment, max_pixel=float(arr.max())):
+                    v = de.evaluate(self.config, arr, equipment)
+                    signal_c, display = de.estimate_rule_signal(arr, equipment, self.config)
+                    severity, explanation = de.rule_verdict(signal_c, equipment, self.config)
+                    self.assertEqual((v.severity, v.explanation, v.display), (severity, explanation, display))
+                    self.assertEqual(v.signal_c, signal_c)
+                    self.assertEqual((v.action, v.color), (de.severity_action(severity), de.severity_color(severity)))
+
+    def test_from_dict_validates_like_load(self):
+        config = de.RuleConfig.from_dict(default_config_dict())
+        self.assertEqual(config.source, "<dict>")
+        self.assertEqual(config.ambient_c, LEGACY_AMBIENT_C)
+        self.assertEqual(config.camera["pixel_max"], 255.0)
+        bad = default_config_dict()
+        bad["equipment"]["pv"]["type"] = "magic_vision"
+        with self.assertRaises(ValueError):
+            de.RuleConfig.from_dict(bad)
+
+    def test_rules_import_without_torch_or_matplotlib(self):
+        code = ("import sys; sys.modules['torch'] = None; sys.modules['matplotlib'] = None; "
+                "sys.path.insert(0, sys.argv[1]); import hlab.rules as r; "
+                "print(r.evaluate(r.RuleConfig.load(), __import__('numpy').zeros((240, 320)), 'pv').severity)")
+        out = subprocess.run([sys.executable, "-c", code, str(ROOT / "src")], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "NORMAL")
+
+
+class TestDemoStillImports(unittest.TestCase):
+    def test_demo_ensemble_imports_and_uses_hlab_rules(self):
+        import os
+        os.environ.setdefault("MPLBACKEND", "Agg")
+        try:
+            import demo_ensemble
+        except ImportError as exc:                    # torch / matplotlib absent on this machine
+            self.skipTest(f"demo dependencies missing: {exc}")
+        self.assertIs(demo_ensemble.evaluate, de.evaluate)
+        self.assertIs(demo_ensemble.combine, de.combine)
+        for name in ("SEVERITY_REGISTRY", "RULE_TYPES", "load_threshold_config", "ensemble_decision",
+                     "estimate_rule_signal", "rule_verdict"):
+            self.assertFalse(hasattr(demo_ensemble, name), f"demo still carries {name}")
 
 
 if __name__ == "__main__":
