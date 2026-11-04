@@ -1,5 +1,8 @@
 """
-Read FLIR-format radiometric JPEGs (R-JPG) without exiftool (HER-82).
+FLIR radiometric JPEGs (R-JPG) without exiftool (HER-82; hlab.rjpg since HER-129).
+
+    raw, calib = read_rjpg(path)      # uint16 sensor counts (H, W), Planck constants
+    celsius = raw_to_celsius(raw, calib)
 
 A FLIR R-JPG is a normal JPEG preview plus an "FFF" container split across
 APP1 segments tagged "FLIR\\0". The container holds:
@@ -14,6 +17,7 @@ Offsets follow ExifTool's FLIR.pm.
 """
 import io
 import struct
+
 import numpy as np
 from PIL import Image
 
@@ -53,7 +57,7 @@ def _endian(rec: bytes) -> str:
 
 
 def read_rjpg(path):
-    """Return (raw uint16 array HxW, calib dict)."""
+    """(raw uint16 array H x W, calib dict with the Planck constants) of one R-JPG."""
     jpg = open(path, "rb").read()
     recs = dict(_records(_fff_bytes(jpg)))
     raw_rec, cam = recs[REC_RAW], recs[REC_CAMINFO]
@@ -84,15 +88,6 @@ def read_rjpg(path):
 
 
 def raw_to_celsius(raw, c):
+    """Raw counts -> degrees C (float32) with the file's Planck constants."""
     s = raw.astype(np.float64)
     return (c["PlanckB"] / np.log(c["PlanckR1"] / (c["PlanckR2"] * (s + c["PlanckO"])) + c["PlanckF"]) - 273.15).astype(np.float32)
-
-
-if __name__ == "__main__":
-    import sys
-    for p in sys.argv[1:]:
-        raw, c = read_rjpg(p)
-        t = raw_to_celsius(raw, c)
-        print(p.split("/")[-1], raw.shape, raw.min(), raw.max(),
-              f"T median {np.median(t):.1f} C, p99 {np.percentile(t, 99):.1f} C",
-              {k: round(v, 4) if isinstance(v, float) else v for k, v in c.items()})

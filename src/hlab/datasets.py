@@ -209,14 +209,15 @@ class Dataset:
 
     def has_split(self, split):
         try:
-            return self._array_path(split).exists()
+            return self.array_path(split).exists()
         except KeyError:
             return split in ("test",) and all(self.has_split(s) for s in self._test_parts())
 
     def _test_parts(self):
         return ("test_normal", "test_fault") if self.name == "v2" else ("holdout", "fault")
 
-    def _array_path(self, split):
+    def array_path(self, split):
+        """Path of the stored array of `split` (degrees C for india_temp, model units elsewhere)."""
         if self.name == "v2":
             return self.dir / _V2_ARRAY[split]
         if self.name in ("pv", "pv_om"):
@@ -270,6 +271,12 @@ class Dataset:
                 self._cache[key] = list(csv.DictReader(fh))
         return self._cache[key]
 
+    def meta(self, split):
+        """One dict per frame of `split`, in array order (the India *_meta.csv rows; sequence for PV)."""
+        if self.name in ("india", "india_temp"):
+            return list(self._india_meta(split))
+        return self.split(split).meta
+
     # ---- splits ----
     def split(self, split):
         if split == "test" and self.name in ("v2", "pv", "pv_om"):
@@ -277,7 +284,7 @@ class Dataset:
             return _concat("test", a, b)
         if split not in self.splits():
             raise ValueError(f"{self.name} has no split {split!r}; splits: {', '.join(self.splits())}")
-        x = np.load(self._array_path(split))
+        x = np.load(self.array_path(split))
         if self.name == "india_temp":
             x = normalize(x, self.stats)              # stored in degrees C
         if self.name in ("india", "india_temp"):
@@ -349,6 +356,9 @@ class InMemoryDataset:
 
     def manifest(self):
         return [(f, s.name, src) for s in self._splits.values() for f, src in zip(s.frame_ids, s.source)]
+
+    def meta(self, split):
+        return list(self.split(split).meta)
 
     def frames(self, split, source=None, **where):
         return Dataset.frames(self, split, source, **where)

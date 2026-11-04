@@ -7,7 +7,7 @@ Run on VAL only (plot 16, 121 faulty frames). Test (plot 18) stays untouched.
 For each faulty frame:
   - error map  = (reconstruction - input)^2 at 240x320
   - boxes      = labelme rectangles from the frame's .json (640x512 coords),
-                 scaled to 320x240, padded by PAD pixels
+                 scaled to 320x240, padded by PAD pixels (hlab.panels.box_mask)
   - err_ratio  = mean error inside boxes / mean error outside
   - hit        = is the single highest-error pixel inside a box?
   - chance     = share of the frame the boxes cover (hit rate if error were random)
@@ -16,8 +16,8 @@ For each faulty frame:
 
 Outputs: results/india/box_check_val.csv, results/india/box_check_val.png, stdout summary
 """
+import argparse
 import csv
-import json
 import math
 import sys
 from pathlib import Path
@@ -25,25 +25,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_autoencoder import ThermalAutoencoder  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hlab.bundle import Bundle  # noqa: E402
+from hlab.datasets import Dataset  # noqa: E402
+from hlab.panels import box_mask, resolve_device  # noqa: E402
+from hlab.paths import RESULTS, ROOT  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data" / "CA_Preprocessed" / "india"
-RES = ROOT / "results" / "india"
-WEIGHTS = ROOT / "models" / "autoencoder_india_best.pth"
-SRC_W, SRC_H, W, H = 640, 512, 320, 240
-
-
-def box_mask(json_path, pad):
-    m = np.zeros((H, W), bool)
-    for s in json.load(open(json_path, encoding="utf-8"))["shapes"]:
-        (x1, y1), (x2, y2) = s["points"]
-        x0, x1_ = sorted((x1, x2)); y0, y1_ = sorted((y1, y2))
-        c0 = max(0, math.floor(x0 * W / SRC_W) - pad); c1 = min(W, math.ceil((x1_ + 1) * W / SRC_W) + pad)
-        r0 = max(0, math.floor(y0 * H / SRC_H) - pad); r1 = min(H, math.ceil((y1_ + 1) * H / SRC_H) + pad)
-        m[r0:r1, c0:c1] = True
-    return m
+RES = RESULTS / "india"
 
 
 def sign_test_p(k, n):
@@ -52,13 +40,12 @@ def sign_test_p(k, n):
     return min(1.0, sum(p for p in pk if p <= pk[k] + 1e-15))
 
 
-def main():
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ThermalAutoencoder().to(dev)
-    model.load_state_dict(torch.load(WEIGHTS, map_location=dev)); model.eval()
+def main(device=None):
+    dev = resolve_device(device)
+    model = Bundle.load("india", dev).model
 
-    x = np.load(DATA / "val.npy")
-    meta = list(csv.DictReader(open(DATA / "val_meta.csv", encoding="utf-8")))
+    s = Dataset("india").split("val")
+    x, meta = s.x, s.meta
     idx = [i for i, m in enumerate(meta) if m["label"] == "faulty"]
     xb = torch.from_numpy(x[idx]).unsqueeze(1).to(dev)
     with torch.no_grad():
@@ -114,4 +101,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(); ap.add_argument("--device", default=None)
+    main(ap.parse_args().device)

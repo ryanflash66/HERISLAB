@@ -14,63 +14,49 @@ on, so a hot spot cannot be copied. Declared before running:
   inference   4 fixed disjoint block patterns, (row + col) % 4, so every block is
               hidden exactly once and never together with an edge neighbour; the
               4 predictions are stitched into one "predicted from surroundings"
-              frame; error map = (prediction - input)^2
+              frame (hlab.panels.hidden_block_predict); error map = (prediction - input)^2
   scores      peak3 and mean inside panels (as evaluate_india_panel.py), beside the
               same no-model rule; VAL only unless --test
 
-  python src/inpaint_india.py train
-  python src/inpaint_india.py eval [--test]
+  python src/experiments/inpaint_india.py train
+  python src/experiments/inpaint_india.py eval [--test]
 """
 import argparse
-import csv
 import random
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as Fn
 from torch.utils.data import DataLoader, TensorDataset
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from evaluate_india import at_threshold, auroc, best_f1_threshold, boot_ci  # noqa: E402
-from evaluate_india_panel import OLD, masked_peak  # noqa: E402
-from train_autoencoder import ThermalAutoencoder  # noqa: E402
-from train_autoencoder_india import flight_holdout  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hlab.bundle import Bundle  # noqa: E402
+from hlab.datasets import Dataset, flight_holdout  # noqa: E402
+from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion, paired_delta_ci  # noqa: E402
+from hlab.model import ThermalAutoencoder  # noqa: E402
+from hlab.panels import blank_ground, block_mask, hidden_block_predict, peak_ratio, peak_standout, resolve_device  # noqa: E402
+from hlab.paths import MODELS, RESULTS  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data" / "CA_Preprocessed" / "india_temp"
-RES = ROOT / "results" / "india_temp"
-MODELS = ROOT / "models"
+RES = RESULTS / "india_temp"
 WEIGHTS = MODELS / "inpaint_india_best.pth"
 SEED, BATCH, EPOCHS, PATIENCE, LR, CLIP = 42, 32, 50, 10, 3e-4, 1.0
 B, P_HIDE, H, W = 8, 0.25, 240, 320
 GH, GW = H // B, W // B
 
 
-def load(split, ns):
-    x = np.load(DATA / f"{split}.npy")
-    pm = np.load(DATA / f"{split}_panelmask.npy")
-    meta = list(csv.DictReader(open(DATA / f"{split}_meta.csv", encoding="utf-8")))
-    y = np.array([1 if m["label"] == "faulty" else 0 for m in meta])
-    xz = ((x - ns["mean"]) / ns["std"]).astype(np.float32)
-    for i in range(len(xz)):
-        if pm[i].any():
-            xz[i][~pm[i]] = np.median(xz[i][pm[i]])
-    return x, xz, pm, meta, y
-
-
-def block_mask(grid):
-    """grid: (N,GH,GW) bool -> (N,1,H,W) float, 1 = hidden."""
-    return grid.float().view(-1, 1, GH, 1, GW, 1).expand(-1, 1, GH, B, GW, B).reshape(-1, 1, H, W)
+def load(ds, split):
+    """(degrees C, z-scored with the ground blanked, panel masks, meta, labels)."""
+    s = ds.split(split)
+    pm = ds.masks(split)
+    return np.load(ds.array_path(split)), blank_ground(s.x, pm), pm, s.meta, s.labels
 
 
 def train(dev):
     torch.manual_seed(SEED); np.random.seed(SEED); random.seed(SEED)
-    ns = np.load(DATA / "norm_stats.npy", allow_pickle=True).item()
-    _, x, pm, meta, _ = load("train", ns)
+    ds = Dataset("india_temp")
+    _, x, pm, meta, _ = load(ds, "train")
     tr, ho, flights = flight_holdout(meta)
     print(f"device {dev} | train {len(tr)} | hold-out {len(ho)} from flights {flights} | hide {B}x{B} blocks, {P_HIDE:.0%} per step", flush=True)
     t = torch.from_numpy(x).unsqueeze(1); pmt = torch.from_numpy(pm).unsqueeze(1)
@@ -81,9 +67,9 @@ def train(dev):
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=5, min_lr=1e-6)
     g = torch.Generator(device=dev).manual_seed(SEED)
 
-    def step(b, m, train_mode):
+    def step(b, m):
         b = b.to(dev, non_blocking=True); m = m.to(dev, non_blocking=True).float()
-        hid = block_mask((torch.rand(len(b), GH, GW, generator=g, device=dev) < P_HIDE))
+        hid = block_mask((torch.rand(len(b), GH, GW, generator=g, device=dev) < P_HIDE), B)
         out = model(b * (1 - hid))
         w = hid * m
         return (((out - b) ** 2) * w).sum() / w.sum().clamp_min(1.0)
@@ -92,12 +78,12 @@ def train(dev):
     for ep in range(1, EPOCHS + 1):
         model.train(); tl = 0.0
         for b, m in dl_tr:
-            opt.zero_grad(); loss = step(b, m, True); loss.backward()
+            opt.zero_grad(); loss = step(b, m); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP); opt.step(); tl += loss.item() * len(b)
         model.eval(); vl = 0.0
         with torch.no_grad():
             for b, m in dl_ho:
-                vl += step(b, m, False).item() * len(b)
+                vl += step(b, m).item() * len(b)
         tl /= len(tr); vl /= len(ho); sched.step(vl)
         mark = ""
         if vl < best:
@@ -112,63 +98,47 @@ def train(dev):
 
 
 @torch.no_grad()
-def predict(model, b, dev):
-    """Stitch 4 disjoint-pattern predictions into one frame predicted from surroundings."""
-    bi, bj = torch.meshgrid(torch.arange(GH), torch.arange(GW), indexing="ij")
-    pat = ((bi + bj) % 4).to(dev)
-    out = torch.zeros_like(b)
-    for k in range(4):
-        hid = block_mask((pat == k)[None].expand(len(b), -1, -1))
-        out += model(b * (1 - hid)) * hid
-    return out
-
-
-@torch.no_grad()
 def scores(model, xc, xz, pm, dev):
     out = {"inpaint_peak3": [], "inpaint_mean": [], "input_peak3": []}
     for i in range(0, len(xz), 64):
         b = torch.from_numpy(xz[i:i + 64]).unsqueeze(1).to(dev)
         m = torch.from_numpy(pm[i:i + 64]).unsqueeze(1).to(dev)
-        e = (predict(model, b, dev) - b) ** 2
-        mx, md, _ = masked_peak(e, m)
-        out["inpaint_peak3"].append((mx / md.clamp_min(1e-12)).cpu().numpy())
+        e = (hidden_block_predict(model, b, B) - b) ** 2
+        out["inpaint_peak3"].append(peak_ratio(e, m).cpu().numpy())
         out["inpaint_mean"].append(torch.stack([ei[mi].mean() if mi.any() else ei.mean() for ei, mi in zip(e, m)]).cpu().numpy())
         t = torch.from_numpy(xc[i:i + 64]).unsqueeze(1).to(dev)
-        mx, md, sd = masked_peak(t, m)
-        out["input_peak3"].append(((mx - md) / sd.clamp_min(1e-6)).cpu().numpy())
+        out["input_peak3"].append(peak_standout(t, m).cpu().numpy())
     return {k: np.concatenate(v) for k, v in out.items()}
 
 
 def report(split, s, y, thr=None):
     print(f"\n======== {split.upper()} ({int(y.sum())} faulty / {int((y == 0).sum())} healthy)")
     for k, v in s.items():
-        a = auroc(v, y); lo, hi = boot_ci(v, y)
+        a = auroc(v, y); lo, hi = auroc_ci(v, y, n_boot=1000, seed=0)
         line = f"  {k:14s} AUROC {a:.3f} (95% CI {lo:.3f} to {hi:.3f})"
         if thr is not None:
-            r = at_threshold(v, y, thr[k]); line += f" | precision {r['precision']:.3f} recall {r['recall']:.3f} F1 {r['f1']:.3f}"
+            r = confusion(v, y, thr[k]); line += f" | precision {r['precision']:.3f} recall {r['recall']:.3f} F1 {r['f1']:.3f}"
         print(line + ("  <- primary" if k == "inpaint_peak3" else ""))
-    p, q = s["inpaint_peak3"], s["input_peak3"]; rng = np.random.default_rng(0)
-    i1, i0 = np.where(y == 1)[0], np.where(y == 0)[0]; d = []
-    for _ in range(2000):
-        idx = np.concatenate([rng.choice(i1, len(i1)), rng.choice(i0, len(i0))]); d.append(auroc(p[idx], y[idx]) - auroc(q[idx], y[idx]))
-    print(f"  model minus no-model rule: {auroc(p, y) - auroc(q, y):+.3f} (95% CI {np.percentile(d, 2.5):+.3f} to {np.percentile(d, 97.5):+.3f})")
+    d, lo, hi = paired_delta_ci(s["input_peak3"], s["inpaint_peak3"], y, n_boot=2000, seed=0)
+    print(f"  model minus no-model rule: {d:+.3f} (95% CI {lo:+.3f} to {hi:+.3f})")
     print(f"  earlier models on this split (peak, panels only): old 0.637 / temp 0.601 / panels-only 0.543; rule 0.639" if split == "val" else "")
 
 
 def evaluate(dev, test):
-    ns = np.load(DATA / "norm_stats.npy", allow_pickle=True).item()
-    model = ThermalAutoencoder().to(dev); model.load_state_dict(torch.load(WEIGHTS, map_location=dev)); model.eval()
-    xc, xz, pm, meta, y = load("val", ns); sv = scores(model, xc, xz, pm, dev)
+    ds = Dataset("india_temp")
+    model = Bundle.load("india_inpaint", dev).model
+    xc, xz, pm, meta, y = load(ds, "val"); sv = scores(model, xc, xz, pm, dev)
     report("val", sv, y); np.save(RES / "val_inpaint_scores.npy", sv, allow_pickle=True)
     if not test:
         return
     thr = {k: best_f1_threshold(v, y) for k, v in sv.items()}
     for split in ("test", "cross_site"):
-        xc, xz, pm, meta, y = load(split, ns); s = scores(model, xc, xz, pm, dev)
+        xc, xz, pm, meta, y = load(ds, split); s = scores(model, xc, xz, pm, dev)
         report(split, s, y, thr); np.save(RES / f"{split}_inpaint_scores.npy", s, allow_pickle=True)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("mode", choices=["train", "eval"]); ap.add_argument("--test", action="store_true")
-    a = ap.parse_args(); dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--device", default=None)
+    a = ap.parse_args(); dev = resolve_device(a.device)
     train(dev) if a.mode == "train" else evaluate(dev, a.test)

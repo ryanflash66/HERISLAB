@@ -5,11 +5,12 @@ Difference from preprocess_india.py: no per-frame stretching. Every frame is
 converted to degrees C and kept on ONE scale, so a hot spot stays hot and the
 rest of the frame is not squashed. Decided before running:
 
-  1. raw 16-bit counts -> degrees C (src/flir_rjpg.py, Planck constants from the file)
+  1. raw 16-bit counts -> degrees C (hlab.rjpg, Planck constants from the file)
   2. clip to [0, 120] C (guards against broken pixels; panels run 30 to 90 C)
-  3. resize to 320x240 (LANCZOS)                      -> stored as degrees C
-  4. z-score with ONE mean/std from the TRAIN split  (done here for the model;
-     the stored .npy files hold degrees C so anything can read real temperatures)
+     and resize to 320x240 (LANCZOS): hlab.transform.to_model_input(t, "celsius")
+                                                        -> stored as degrees C
+  3. z-score with ONE mean/std from the TRAIN split  (done by hlab.datasets at
+     load time; the stored .npy files hold degrees C so anything can read real temperatures)
 
 The 17 certified frames from the FLIR Vue Pro camera have unverified temperature
 calibration and are left out of cross_site (120 frames remain).
@@ -25,22 +26,15 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from flir_rjpg import read_rjpg, raw_to_celsius  # noqa: E402
+from hlab.paths import MANIFESTS, PREPROCESSED, ROOT  # noqa: E402
+from hlab.rjpg import raw_to_celsius, read_rjpg  # noqa: E402
+from hlab.transform import to_model_input  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-SPLIT_CSV = ROOT / "docs" / "data_manifests" / "india_plot_split.csv"
-OUT = ROOT / "data" / "CA_Preprocessed" / "india_temp"
-TARGET_SIZE = (320, 240)
+SPLIT_CSV = MANIFESTS / "india_plot_split.csv"
+OUT = PREPROCESSED / "india_temp"
 SPLITS = ["train", "val", "test", "cross_site"]
-T_MIN, T_MAX = 0.0, 120.0
-
-
-def to_temp_input(t):
-    t = np.clip(t.astype(np.float32), T_MIN, T_MAX)
-    return np.asarray(Image.fromarray(t, mode="F").resize(TARGET_SIZE, Image.LANCZOS), dtype=np.float32)
 
 
 def main():
@@ -56,7 +50,7 @@ def main():
             skipped += 1; continue
         raw, calib = read_rjpg(ROOT / r["rel_path"])
         t = raw_to_celsius(raw, calib)
-        arrays[s].append(to_temp_input(t))
+        arrays[s].append(to_model_input(t, "celsius"))
         metas[s].append({"rel_path": r["rel_path"], "label": r["label"], "plot": r["plot"],
                          "flight": r["flight"], "t_median": round(float(np.median(t)), 2),
                          "t_p99": round(float(np.percentile(t, 99)), 2), "t_max": round(float(t.max()), 2)})
