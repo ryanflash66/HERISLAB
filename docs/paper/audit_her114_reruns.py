@@ -41,7 +41,8 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import audit_eval_validity as A  # noqa: E402
+import audit_eval_validity as A  # noqa: E402  (puts src/ on sys.path)
+from hlab.metrics import auroc, auroc_ci, confusion, from_groups, trivial_f1  # noqa: E402
 
 ROOT = A.ROOT
 OUT = ROOT / "results" / "her-114"
@@ -75,9 +76,8 @@ def neighbour(p, d):
     return p[:m.start(1)] + str(int(m.group(1)) + d).zfill(len(m.group(1))) + m.group(2)
 
 
-def run_scenario(name, keep, D):
-    """keep: boolean mask over the 892 held-out healthy frames."""
-    A.RNG = np.random.default_rng(0)
+def run_scenario(name, keep, D, thr, seed=A.SEED):
+    """keep: boolean mask over the held-out healthy frames; thr: saved threshold of the model under test."""
     ho = [p for p, k in zip(D["ho"], keep) if k]
     n = D["pvn"][keep]
     nF = D["pvnF"][keep]
@@ -92,9 +92,10 @@ def run_scenario(name, keep, D):
     print(f"held-out healthy with an adjacent frame in TRAIN: {adj} / {len(ho)}")
 
     for lab, f in [("1000 files", D["pvf"]), ("140 unique", D["fu"])]:
-        au = A.auroc(n, f); lo, hi = A.auroc_ci(n, f)
-        prev = len(f) / (len(n) + len(f)); triv = 2 * prev / (1 + prev)
-        c = A.confusion(n, f, A.PV_THR)
+        s, y = from_groups(n, f)
+        au = auroc(s, y); lo, hi = auroc_ci(s, y, seed=seed)
+        triv = trivial_f1(y)
+        c = A.rounded(confusion(s, y, thr))
         print(f"\n{lab}: AUROC {au:.4f} [{lo:.3f}, {hi:.3f}]  flag-everything F1 {triv:.4f}")
         print("  at saved threshold:", c)
         key = "files" if lab == "1000 files" else "unique"
@@ -102,7 +103,7 @@ def run_scenario(name, keep, D):
         S[f"f1_trivial_{key}"] = round(triv, 4); S[f"f1_saved_{key}"] = c["f1"]
         S[f"fp_{key}"] = c["fp"]; S[f"recall_{key}"] = c["recall"]; S[f"precision_{key}"] = c["precision"]
 
-    flagged = n > A.PV_THR
+    flagged = n > thr
     fp_thm = int((flagged & (src == "thm")).sum()); fp_om = int((flagged & (src != "thm")).sum())
     S["fp_thm"] = fp_thm; S["fp_om"] = fp_om
     S["fp_share_thm"] = round(fp_thm / max(fp_thm + fp_om, 1), 3)
@@ -111,26 +112,26 @@ def run_scenario(name, keep, D):
     for s in ("om_dr", "om_sr", "thm"):
         e = n[src == s]
         if len(e):
-            print(f"  {s:5s}: n={len(e):4d}  median err {np.median(e):.4f}  flagged {(e > A.PV_THR).sum()}")
+            print(f"  {s:5s}: n={len(e):4d}  median err {np.median(e):.4f}  flagged {(e > thr).sum()}")
 
     om = n[src != "thm"]; thm = n[src == "thm"]
     if len(thm):
-        S["auroc_source"] = round(A.auroc(om, thm), 3); S["auroc_source_def"] = "healthy O&M vs healthy THM"
+        S["auroc_source"] = round(auroc(*from_groups(om, thm)), 3); S["auroc_source_def"] = "healthy O&M vs healthy THM"
     else:
-        S["auroc_source"] = round(A.auroc(n[src == "om_dr"], n[src == "om_sr"]), 3)
+        S["auroc_source"] = round(auroc(*from_groups(n[src == "om_dr"], n[src == "om_sr"])), 3)
         S["auroc_source_def"] = "healthy O&M sequence dr vs sr"
     print(f"source AUROC ({S['auroc_source_def']}): {S['auroc_source']}")
-    print(f"AUROC healthy O&M vs unique fault: {A.auroc(om, D['fu']):.3f}")
+    print(f"AUROC healthy O&M vs unique fault: {auroc(*from_groups(om, D['fu'])):.3f}")
     if len(thm):
-        print(f"AUROC healthy THM vs unique fault: {A.auroc(thm, D['fu']):.3f}")
+        print(f"AUROC healthy THM vs unique fault: {auroc(*from_groups(thm, D['fu'])):.3f}")
 
-    single = {k: max(A.auroc(nF[:, j], D["pvfF_u"][:, j]), 1 - A.auroc(nF[:, j], D["pvfF_u"][:, j]))
-              for j, k in enumerate(A.FEAT)}
+    aj = [auroc(*from_groups(nF[:, j], D["pvfF_u"][:, j])) for j in range(len(A.FEAT))]
+    single = {k: max(v, 1 - v) for k, v in zip(A.FEAT, aj)}
     top = sorted(single.items(), key=lambda kv: -kv[1])[:3]
     S["p1_baseline"] = round(float(single["p1"]), 3)
     S["best_single"] = f"{top[0][0]} {top[0][1]:.3f}"
     print(f"single-statistic AUROC (unique faults): p1 = {single['p1']:.3f}; best {[(k, round(v, 3)) for k, v in top]}")
-    lr = A.logreg_cv_auroc(nF, D["pvfF_u"])
+    lr = A.logreg_cv_auroc(nF, D["pvfF_u"], seed=seed)
     S["logreg16"] = round(float(lr), 3)
     print(f"5-fold logistic regression on 16 statistics: AUROC {lr:.3f}")
     return S
@@ -156,7 +157,7 @@ def main():
         buf = io.StringIO()
         with redirect_stdout(buf):
             print("=" * 70, f"\nHER-114 rerun {name}\n" + "=" * 70)
-            S = run_scenario(name, keep, D)
+            S = run_scenario(name, keep, D, A.PV_THR)
         (OUT / f"rerun_{name}.txt").write_text(buf.getvalue(), encoding="utf-8")
         print(buf.getvalue())
         rows.append(S)

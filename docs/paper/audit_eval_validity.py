@@ -17,7 +17,9 @@ Checks:
   5. Headline metrics with bootstrap 95% CIs, on the full and deduplicated set
   6. Rule layer: tier distribution and ensemble verdicts on the test sets
 
-Dependencies: numpy, Pillow (already in the project venv). No sklearn needed.
+Metrics (AUROC, bootstrap CI, confusion, threshold search) come from
+src/hlab/metrics.py (HER-122); this file keeps feature extraction and the
+no-model baselines. Dependencies: numpy, Pillow (already in the project venv).
 
 Usage:
     venv\\Scripts\\python.exe docs\\paper\\audit_eval_validity.py
@@ -25,6 +27,7 @@ Usage:
 
 import hashlib
 import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -32,59 +35,30 @@ import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion, from_groups, trivial_f1  # noqa: E402
+
 PRE = ROOT / "data" / "CA_Preprocessed"
 RAW = ROOT / "data" / "CA_Training_Data"
 RES = ROOT / "results"
 
 PV_THR = 0.027865182608366013   # results/pv_eval_metrics.npy
 V2_THR = 0.0003388182958588004  # results/eval_metrics.npy
-RNG = np.random.default_rng(0)
+SEED = 0                        # bootstrap / cross-validation seed, passed explicitly
 
 
 # ---------------------------------------------------------------- metrics
-def auroc(neg, pos):
-    """Mann-Whitney AUROC with tie correction."""
-    s = np.concatenate([neg, pos])
-    order = s.argsort(kind="mergesort")
-    ranks = np.empty(len(s))
-    ranks[order] = np.arange(1, len(s) + 1)
-    # average ranks over ties
-    _, inv, cnt = np.unique(s, return_inverse=True, return_counts=True)
-    sums = np.bincount(inv, weights=ranks)
-    ranks = (sums / cnt)[inv]
-    rp = ranks[len(neg):].sum()
-    return (rp - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+def rounded(c):
+    """A hlab.metrics confusion dict as the audit prints it: counts, then rates to 4 decimals."""
+    return dict(tp=c["tp"], fn=c["fn"], fp=c["fp"], tn=c["tn"], precision=round(c["precision"], 4),
+                recall=round(c["recall"], 4), f1=round(c["f1"], 4), specificity=round(c["specificity"], 4))
 
 
-def auroc_ci(neg, pos, B=2000):
-    vals = [auroc(RNG.choice(neg, len(neg)), RNG.choice(pos, len(pos))) for _ in range(B)]
-    return np.percentile(vals, [2.5, 97.5])
-
-
-def confusion(neg, pos, thr):
-    tp = int((pos > thr).sum()); fn = len(pos) - tp
-    fp = int((neg > thr).sum()); tn = len(neg) - fp
-    p = tp / (tp + fp) if tp + fp else 0.0
-    r = tp / len(pos)
-    f1 = 2 * p * r / (p + r) if p + r else 0.0
-    return dict(tp=tp, fn=fn, fp=fp, tn=tn, precision=round(p, 4), recall=round(r, 4),
-                f1=round(f1, 4), specificity=round(tn / len(neg), 4))
-
-
-def best_f1_threshold(neg, pos):
-    s = np.concatenate([neg, pos])
-    best = (0.0, None)
-    for t in np.linspace(s.min(), s.max(), 1000):
-        f1 = confusion(neg, pos, t)["f1"]
-        if f1 > best[0]:
-            best = (f1, t)
-    return best[1]
-
-
-def logreg_cv_auroc(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1):
+def logreg_cv_auroc(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1, seed=SEED):
     """5-fold CV logistic regression (standardized, L2), numpy only."""
+    rng = np.random.default_rng(seed)
     X = np.vstack([X_neg, X_pos]); y = np.r_[np.zeros(len(X_neg)), np.ones(len(X_pos))]
-    idx_n = RNG.permutation(len(X_neg)); idx_p = RNG.permutation(len(X_pos)) + len(X_neg)
+    idx_n = rng.permutation(len(X_neg)); idx_p = rng.permutation(len(X_pos)) + len(X_neg)
     folds = [np.r_[a, b] for a, b in zip(np.array_split(idx_n, k), np.array_split(idx_p, k))]
     out = np.zeros(len(y))
     for f in folds:
@@ -97,7 +71,7 @@ def logreg_cv_auroc(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1):
             g = A.T @ (p - y[tr]) / len(tr) + l2 * np.r_[0, w[1:]] / len(tr)
             w -= lr * g
         out[f] = 1 / (1 + np.exp(-(np.c_[np.ones(len(f)), (X[f] - mu) / sd] @ w)))
-    return auroc(out[y == 0], out[y == 1])
+    return auroc(out, y)
 
 
 # ---------------------------------------------------------------- features
@@ -179,19 +153,19 @@ def main():
     for s in ("om", "thm"):
         e = pvn[src == s]
         print(f"healthy {s:3s}: n={len(e):4d}  median err {np.median(e):.4f}  flagged at thr {(e > PV_THR).sum()}")
-    print(f"AUROC healthy O&M vs healthy THM : {auroc(pvn[src == 'om'], pvn[src == 'thm']):.3f}")
-    print(f"AUROC healthy O&M vs unique fault: {auroc(pvn[src == 'om'], fu):.3f}")
-    print(f"AUROC healthy THM vs unique fault: {auroc(pvn[src == 'thm'], fu):.3f}")
+    print(f"AUROC healthy O&M vs healthy THM : {auroc(*from_groups(pvn[src == 'om'], pvn[src == 'thm'])):.3f}")
+    print(f"AUROC healthy O&M vs unique fault: {auroc(*from_groups(pvn[src == 'om'], fu)):.3f}")
+    print(f"AUROC healthy THM vs unique fault: {auroc(*from_groups(pvn[src == 'thm'], fu)):.3f}")
 
     print("\n" + "=" * 70, "\n4/5. Headline metrics, CIs, trivial baselines\n" + "=" * 70)
     gn = np.load(RES / "normal_errors.npy"); gf = np.load(RES / "fault_errors.npy")
     for name, n, f, thr in [("v2 general", gn, gf, V2_THR), ("PV, 1000 files", pvn, pvf, PV_THR),
                             ("PV, 140 unique", pvn, fu, PV_THR)]:
-        lo, hi = auroc_ci(n, f)
-        prev = len(f) / (len(n) + len(f)); triv = 2 * prev / (1 + prev)
-        print(f"\n{name}: AUROC {auroc(n, f):.4f} [{lo:.3f}, {hi:.3f}]   flag-everything F1 = {triv:.4f}")
-        print("  at saved threshold :", confusion(n, f, thr))
-        print("  re-tuned best-F1   :", confusion(n, f, best_f1_threshold(n, f)))
+        s, y = from_groups(n, f)
+        lo, hi = auroc_ci(s, y, seed=SEED)
+        print(f"\n{name}: AUROC {auroc(s, y):.4f} [{lo:.3f}, {hi:.3f}]   flag-everything F1 = {trivial_f1(y):.4f}")
+        print("  at saved threshold :", rounded(confusion(s, y, thr)))
+        print("  re-tuned best-F1   :", rounded(confusion(s, y, best_f1_threshold(s, y))))
 
     print("\nComputing global image statistics (no model)...")
     pvnF = global_features(PRE / "pv" / "test_normal.npy", PRE / "pv" / "norm_stats.npy")
@@ -200,7 +174,8 @@ def main():
     gnF = global_features(PRE / "test_normal.npy", PRE / "norm_stats.npy")
     gfF = global_features(PRE / "test_fault.npy", PRE / "norm_stats.npy")
     for name, a, b in [("PV (unique faults)", pvnF, pvfF_u), ("v2 general", gnF, gfF)]:
-        single = {k: max(auroc(a[:, j], b[:, j]), 1 - auroc(a[:, j], b[:, j])) for j, k in enumerate(FEAT)}
+        aj = [auroc(*from_groups(a[:, j], b[:, j])) for j in range(len(FEAT))]
+        single = {k: max(v, 1 - v) for k, v in zip(FEAT, aj)}
         top = sorted(((k, float(v)) for k, v in single.items()), key=lambda kv: -kv[1])[:3]
         print(f"{name}: best single statistics {[(k, round(v, 3)) for k, v in top]}")
         print(f"{name}: 5-fold logistic regression on 16 statistics AUROC {logreg_cv_auroc(a, b):.3f}")

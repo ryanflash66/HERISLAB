@@ -30,7 +30,8 @@ import numpy as np
 import torch
 
 from train_autoencoder import ThermalAutoencoder
-from evaluate_autoencoder import compute_reconstruction_errors, find_best_threshold, compute_auroc
+from evaluate_autoencoder import compute_reconstruction_errors, score_errors
+from hlab.metrics import confusion, from_groups
 from preprocess_pv import load_image_raw
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,15 +56,6 @@ class Tee:
     def flush(self):
         for s in self.streams:
             s.flush()
-
-
-def confusion(normal, fault, thr):
-    tp = int((fault > thr).sum()); fn = len(fault) - tp
-    fp = int((normal > thr).sum()); tn = len(normal) - fp
-    p = tp / (tp + fp) if tp + fp else 0.0
-    r = tp / len(fault)
-    f1 = 2 * p * r / (p + r) if p + r else 0.0
-    return dict(tp=tp, fp=fp, fn=fn, tn=tn, precision=p, recall=r, f1=f1)
 
 
 def original_holdout_thm():
@@ -104,13 +96,12 @@ def main():
         np.save(RESULTS_DIR / "pv_om_normal_errors.npy", normal_errors)
         np.save(RESULTS_DIR / "pv_om_fault_errors.npy", fault_errors)
 
-        auroc = compute_auroc(normal_errors, fault_errors)
-        threshold, metrics = find_best_threshold(normal_errors, fault_errors)
+        auroc, threshold, metrics = score_errors(normal_errors, fault_errors)
         print(f"\n  AUROC (1,000 fault files): {auroc:.4f}")
         print(f"  Re-tuned best-F1 threshold: {threshold:.6f}")
         print(f"  Precision {metrics['precision']:.4f}  Recall {metrics['recall']:.4f}  F1 {metrics['f1']:.4f}")
         print(f"  TP {metrics['tp']}  FP {metrics['fp']}  FN {metrics['fn']}  TN {metrics['tn']}")
-        c_old = confusion(normal_errors, fault_errors, OLD_PV_THR)
+        c_old = confusion(*from_groups(normal_errors, fault_errors), OLD_PV_THR)
         print(f"  At the THM+O&M model's threshold {OLD_PV_THR:.6f} (reference only): "
               f"FP {c_old['fp']}  FN {c_old['fn']}  F1 {c_old['f1']:.4f}")
         print("  THM+O&M model, same fault set, 892 healthy (808 O&M + 84 THM): AUROC 0.9741  F1 0.9440  FP 87")
