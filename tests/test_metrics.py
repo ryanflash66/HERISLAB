@@ -11,8 +11,7 @@ import numpy as np
 import pytest
 
 from hlab import metrics as M
-
-RESULTS = Path(__file__).resolve().parent.parent / "results"
+from hlab.paths import RESULTS
 
 
 # ---------------------------------------------------------------- fixtures

@@ -25,58 +25,44 @@ verified property.
 
 import os
 import numpy as np
-from pathlib import Path
 
+from hlab.datasets import V2_FOLDERS, raw_files, write_manifest
+from hlab.paths import PREPROCESSED, RAW, ROOT
 from hlab.transform import load_gray, normalize, to_model_input
 
 # --- Config ---
-ROOT = Path(__file__).resolve().parent.parent
-INPUT_DIR = ROOT / "data" / "CA_Training_Data"
-OUTPUT_DIR = ROOT / "data" / "CA_Preprocessed"
+INPUT_DIR = RAW
+OUTPUT_DIR = PREPROCESSED
 
-# Exclude solar_modules: 24x40 images are too small
-TRAIN_FOLDERS = [
-    "electric_motor",
-    "induction_motor",
-    "transformer",
-    "pv_om_inspection",
-    "pv_thermal_inspection",
-]
-
-TEST_NORMAL_FOLDERS = [
-    "electric_motor",
-    "induction_motor",
-    "transformer",
-]
-
-TEST_FAULT_FOLDERS = [
-    "electric_motor",
-    "induction_motor",
-    "transformer",
-]
+# Which raw folders feed which split is declared once, in hlab.datasets
+# (solar_modules is excluded there: 24x40 images are too small).
+TRAIN_FOLDERS = list(V2_FOLDERS["train"])
+TEST_NORMAL_FOLDERS = list(V2_FOLDERS["test_normal"])
+TEST_FAULT_FOLDERS = list(V2_FOLDERS["test_fault"])
 
 
-def load_folder(input_folder):
-    """Load all images from a folder as 0-255 model-input arrays (not yet z-scored)."""
-    images = []
+def load_folder(subdir, folder):
+    """Load RAW/subdir/folder as 0-255 model-input arrays (not yet z-scored).
+
+    Returns (images, skipped, frame_ids); frame_ids are repo-relative and
+    aligned with images, so the split manifest matches the arrays.
+    """
+    images, frame_ids = [], []
     skipped = 0
 
-    if not input_folder.exists():
-        print(f"  MISSING: {input_folder}")
-        return images, skipped
+    if not (INPUT_DIR / subdir / folder).exists():
+        print(f"  MISSING: {INPUT_DIR / subdir / folder}")
+        return images, skipped, frame_ids
 
-    files = sorted(os.listdir(input_folder))
-    for fname in files:
-        fpath = os.path.join(input_folder, fname)
-        if not os.path.isfile(fpath):
-            continue
+    for frame_id in raw_files(subdir, folder):
         try:
-            images.append(to_model_input(load_gray(fpath)))
+            images.append(to_model_input(load_gray(ROOT / frame_id)))
+            frame_ids.append(frame_id)
         except Exception as e:
-            print(f"  SKIP {fname}: {e}")
+            print(f"  SKIP {os.path.basename(frame_id)}: {e}")
             skipped += 1
 
-    return images, skipped
+    return images, skipped, frame_ids
 
 
 def main():
@@ -86,12 +72,13 @@ def main():
 
     # Load all train/normal images raw
     train_images = []
+    manifest = {"TRAIN": [], "TEST_NORMAL": [], "TEST_FAULT": []}
     for folder in TRAIN_FOLDERS:
-        input_folder = INPUT_DIR / "train" / "normal" / folder
         print(f"Loading train/normal/{folder}...")
-        imgs, skipped = load_folder(input_folder)
+        imgs, skipped, ids = load_folder("train/normal", folder)
         print(f"  {len(imgs)} loaded, {skipped} skipped")
         train_images.extend(imgs)
+        manifest["TRAIN"].extend(ids)
 
     if not train_images:
         print("ERROR: No training images found.")
@@ -126,11 +113,11 @@ def main():
     print(f"\nLoading test/normal...")
     test_normal_images = []
     for folder in TEST_NORMAL_FOLDERS:
-        input_folder = INPUT_DIR / "test" / "normal" / folder
         print(f"  Loading test/normal/{folder}...")
-        imgs, skipped = load_folder(input_folder)
+        imgs, skipped, ids = load_folder("test/normal", folder)
         print(f"    {len(imgs)} loaded, {skipped} skipped")
         test_normal_images.extend(imgs)
+        manifest["TEST_NORMAL"].extend(ids)
 
     if test_normal_images:
         test_normal_arr = np.stack(test_normal_images, axis=0)
@@ -144,11 +131,11 @@ def main():
     print(f"\nLoading test/fault...")
     test_fault_images = []
     for folder in TEST_FAULT_FOLDERS:
-        input_folder = INPUT_DIR / "test" / "fault" / folder
         print(f"  Loading test/fault/{folder}...")
-        imgs, skipped = load_folder(input_folder)
+        imgs, skipped, ids = load_folder("test/fault", folder)
         print(f"    {len(imgs)} loaded, {skipped} skipped")
         test_fault_images.extend(imgs)
+        manifest["TEST_FAULT"].extend(ids)
 
     if test_fault_images:
         test_fault_arr = np.stack(test_fault_images, axis=0)
@@ -163,6 +150,15 @@ def main():
     np.save(stats_path, stats)
     print(f"\nSaved normalization stats: {stats_path}")
     print(f"  mean={global_mean:.4f}, std={global_std:.4f}")
+
+    # Which raw file sits at which array row (hlab.datasets reads this)
+    manifest_path = OUTPUT_DIR / "split_manifest.txt"
+    write_manifest(manifest_path, manifest, header=[
+        "v2 multi-equipment split manifest (preprocess.py)",
+        f"{len(manifest['TRAIN'])} train / {len(manifest['TEST_NORMAL'])} test normal / "
+        f"{len(manifest['TEST_FAULT'])} test fault",
+    ])
+    print(f"Saved split manifest: {manifest_path}")
 
     print("\nDone.")
 

@@ -1,15 +1,14 @@
 """
 Evaluate the PV-specialist autoencoder (HER-90).
 
-Loads the PV-specialist weights and scores them against the PV-only test
-split produced by src/preprocess_pv.py. That split is random per frame, so
-frames from the same video can sit in both train and test (not independent).
-Reuses compute_reconstruction_errors / score_errors from evaluate_autoencoder.py
-(metrics from hlab.metrics), so the metric code is the same as the v2 baseline;
-the test sets and the preprocessing differ, so the numbers are not a
-like-for-like comparison.
+Loads the "pv" bundle and scores it against the PV-only test split produced
+by src/preprocess_pv.py. That split is random per frame, so frames from the
+same video can sit in both train and test (not independent). Reuses
+score_errors from evaluate_autoencoder.py (metrics from hlab.metrics), so the
+metric code is the same as the v2 baseline; the test sets and the
+preprocessing differ, so the numbers are not a like-for-like comparison.
 
-Inputs:
+Inputs (through hlab.bundle / hlab.datasets):
   models/autoencoder_pv_best.pth
   data/CA_Preprocessed/pv/test_normal.npy
   data/CA_Preprocessed/pv/test_fault.npy   (if present; HER-87 deliverable)
@@ -21,26 +20,16 @@ Outputs:
   results/eval_log_pv.txt       (console tee)
 """
 
-import os
 import sys
-from pathlib import Path
 
 import numpy as np
-import torch
 
-from train_autoencoder import ThermalAutoencoder
-from evaluate_autoencoder import compute_reconstruction_errors, print_metrics, score_errors
+from evaluate_autoencoder import print_metrics, score_errors
+from hlab.bundle import Bundle
+from hlab.datasets import Dataset
+from hlab.paths import RESULTS
 
-ROOT = Path(__file__).resolve().parent.parent
-PV_DATA_DIR = ROOT / "data" / "CA_Preprocessed" / "pv"
-MODEL_DIR = ROOT / "models"
-RESULTS_DIR = ROOT / "results"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-MODEL_PATH = MODEL_DIR / "autoencoder_pv_best.pth"
-NORMAL_NPY = PV_DATA_DIR / "test_normal.npy"
-FAULT_NPY = PV_DATA_DIR / "test_fault.npy"
-LOG_PATH = RESULTS_DIR / "eval_log_pv.txt"
+LOG_PATH = RESULTS / "eval_log_pv.txt"
 
 
 class Tee:
@@ -55,56 +44,58 @@ class Tee:
 
 
 def main():
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS.mkdir(parents=True, exist_ok=True)
     log_handle = LOG_PATH.open("w", encoding="utf-8")
     original_stdout = sys.stdout
     sys.stdout = Tee(sys.stdout, log_handle)
 
     try:
-        print(f"Device: {DEVICE}")
-        if DEVICE.type == "cuda":
-            print(f"GPU: {torch.cuda.get_device_name(0)}")
-
-        # --- Load PV specialist model ---
-        if not MODEL_PATH.exists():
-            print(f"ERROR: PV specialist weights not found at {MODEL_PATH}")
-            print("Run src/train_autoencoder_pv.py first.")
+        # --- Load PV specialist bundle ---
+        try:
+            bundle = Bundle.load("pv")
+        except FileNotFoundError as exc:
+            print(f"ERROR: {exc}")
+            print("Run src/preprocess_pv.py and src/train_autoencoder_pv.py first.")
             return
+        print(f"Device: {bundle.device}")
+        if bundle.device.type == "cuda":
+            import torch
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
         print("\nLoading PV specialist model...")
-        model = ThermalAutoencoder().to(DEVICE)
-        model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
-        print(f"  Loaded {MODEL_PATH.name}")
+        bundle.model
+        print(f"  Loaded {bundle.weights.name}")
 
         # --- Test normals ---
-        if not NORMAL_NPY.exists():
-            print(f"ERROR: {NORMAL_NPY} not found. Run src/preprocess_pv.py first.")
+        dataset = Dataset("pv")
+        if not dataset.has_split("holdout"):
+            print(f"ERROR: {dataset} has no holdout array. Run src/preprocess_pv.py first.")
             return
         print("\nLoading PV holdout normals...")
-        test_normal = np.load(NORMAL_NPY)
+        test_normal = dataset.split("holdout").x
         print(f"  Test normal: {test_normal.shape[0]} images")
 
         print("\nComputing reconstruction errors on holdout normals...")
-        normal_errors = compute_reconstruction_errors(model, test_normal)
+        normal_errors = bundle.score_normalized(test_normal)
         print(f"  mean: {normal_errors.mean():.6f}  std: {normal_errors.std():.6f}")
         print(f"  min:  {normal_errors.min():.6f}  max: {normal_errors.max():.6f}")
 
-        np.save(RESULTS_DIR / "pv_normal_errors.npy", normal_errors)
-        print(f"  Saved: {RESULTS_DIR / 'pv_normal_errors.npy'}")
+        np.save(RESULTS / "pv_normal_errors.npy", normal_errors)
+        print(f"  Saved: {RESULTS / 'pv_normal_errors.npy'}")
 
         # --- Test faults (if available) ---
-        if not FAULT_NPY.exists():
-            print(f"\nSKIP fault eval: {FAULT_NPY} not found.")
+        if not dataset.has_split("fault"):
+            print(f"\nSKIP fault eval: {dataset} has no fault array.")
             print("Waiting on HER-87 fault dataset. Full metrics / threshold calibration")
             print("are deferred until test_fault.npy exists.")
             print("\n--- Partial eval complete (normals only). ---")
             return
 
         print("\nLoading PV fault test set...")
-        test_fault = np.load(FAULT_NPY)
+        test_fault = dataset.split("fault").x
         print(f"  Test fault: {test_fault.shape[0]} images")
 
         print("\nComputing reconstruction errors on faults...")
-        fault_errors = compute_reconstruction_errors(model, test_fault)
+        fault_errors = bundle.score_normalized(test_fault)
         print(f"  mean: {fault_errors.mean():.6f}  std: {fault_errors.std():.6f}")
         print(f"  min:  {fault_errors.min():.6f}  max: {fault_errors.max():.6f}")
 
@@ -120,14 +111,14 @@ def main():
         print("    AUROC: 0.9023   F1: 0.9807   Precision: 0.9621   Recall: 1.0000")
 
         # Save
-        np.save(RESULTS_DIR / "pv_fault_errors.npy", fault_errors)
-        np.save(RESULTS_DIR / "pv_eval_metrics.npy", {
+        np.save(RESULTS / "pv_fault_errors.npy", fault_errors)
+        np.save(RESULTS / "pv_eval_metrics.npy", {
             "auroc": auroc,
             "threshold": threshold,
             **metrics,
         })
-        print(f"\nSaved: {RESULTS_DIR / 'pv_fault_errors.npy'}")
-        print(f"Saved: {RESULTS_DIR / 'pv_eval_metrics.npy'}")
+        print(f"\nSaved: {RESULTS / 'pv_fault_errors.npy'}")
+        print(f"Saved: {RESULTS / 'pv_eval_metrics.npy'}")
 
         print("\n--- PV specialist evaluation complete. ---")
     finally:

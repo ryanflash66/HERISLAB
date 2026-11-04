@@ -14,10 +14,7 @@ import pytest
 from PIL import Image
 
 from hlab import transform as T
-
-ROOT = Path(__file__).resolve().parent.parent
-RAW = ROOT / "data" / "CA_Training_Data"
-PRE = ROOT / "data" / "CA_Preprocessed"
+from hlab.paths import PREPROCESSED as PRE, RAW, ROOT
 
 
 def _legacy_load_image_raw(filepath):

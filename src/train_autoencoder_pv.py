@@ -1,8 +1,8 @@
 """
 Train the PV-specialist autoencoder (HER-89).
 
-Same architecture as the v2 model (`ThermalAutoencoder` imported from
-`train_autoencoder`), same hyperparameters, different data source:
+Same architecture as the v2 model (`ThermalAutoencoder` from `hlab.model`),
+same hyperparameters, different data source:
 
   Input:  data/CA_Preprocessed/pv/train_normal.npy (PV-only, 8019 images)
   Output: models/autoencoder_pv_best.pth
@@ -16,20 +16,18 @@ left untouched.
 import os
 import sys
 import time
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from train_autoencoder import ThermalAutoencoder  # reuse v2's architecture
+from hlab.model import ThermalAutoencoder  # reuse v2's architecture
+from hlab.paths import MODELS, PREPROCESSED, RESULTS
 
 # --- Config ---
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data" / "CA_Preprocessed" / "pv"
-MODEL_DIR = ROOT / "models"
-RESULTS_DIR = ROOT / "results"
+DATA_DIR = PREPROCESSED / "pv"
+MODEL_DIR = MODELS
+RESULTS_DIR = RESULTS
 BATCH_SIZE = 32
 EPOCHS = 50
 VAL_SPLIT = 0.1

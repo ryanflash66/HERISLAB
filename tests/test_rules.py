@@ -20,8 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from hlab import rules as de
-
-ROOT = Path(__file__).resolve().parent.parent
+from hlab.paths import ROOT
 
 
 # --- Legacy implementation (pre-refactor, hardcoded) ---

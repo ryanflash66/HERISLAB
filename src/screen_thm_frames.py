@@ -30,11 +30,12 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
-ROOT = Path(__file__).resolve().parents[1]
-THM = ROOT / "data" / "CA_Training_Data" / "train" / "normal" / "pv_thermal_inspection"
-OUT = ROOT / "results" / "her-114"
-MANIFEST = ROOT / "docs" / "data_manifests" / "thm_screened_frames.csv"
-SPLITS = ROOT / "docs" / "data_manifests" / "pv_normal_splits.csv"
+from hlab.paths import MANIFESTS, RAW, RESULTS
+
+THM = RAW / "train" / "normal" / "pv_thermal_inspection"
+OUT = RESULTS / "her-114"
+MANIFEST = MANIFESTS / "thm_screened_frames.csv"
+SPLITS = MANIFESTS / "pv_normal_splits.csv"
 
 
 def median3(a):

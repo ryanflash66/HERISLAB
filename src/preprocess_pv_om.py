@@ -17,18 +17,18 @@ Usage:
     venv/Scripts/python.exe src/preprocess_pv_om.py
 """
 
-from pathlib import Path
-
 import preprocess_pv as P
+from hlab.datasets import PV_FOLDERS
+from hlab.paths import PREPROCESSED
 
-OUTPUT_DIR = P.ROOT / "data" / "CA_Preprocessed" / "pv_om"
-ORIGINAL_DIR = P.ROOT / "data" / "CA_Preprocessed" / "pv"
+OUTPUT_DIR = PREPROCESSED / "pv_om"
+ORIGINAL_DIR = PREPROCESSED / "pv"
 
 
 def main():
     assert OUTPUT_DIR != ORIGINAL_DIR
     P.OUTPUT_DIR = OUTPUT_DIR
-    P.PV_TRAIN_FOLDERS = ["pv_om_inspection"]
+    P.PV_TRAIN_FOLDERS = list(PV_FOLDERS["pv_om"])
     # RANDOM_SEED (42), HOLDOUT_FRACTION (0.10) and the loaders (hlab.transform)
     # are inherited unchanged from preprocess_pv.
     print(f"O&M-only variant: folders={P.PV_TRAIN_FOLDERS}, seed={P.RANDOM_SEED}, "

@@ -34,8 +34,9 @@ from pathlib import Path
 
 import numpy as np
 
-# Until hlab.paths exists this module knows where the shipped defaults live.
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "thresholds_iec.json"
+from hlab.paths import CONFIG
+
+DEFAULT_CONFIG_PATH = CONFIG / "thresholds_iec.json"
 
 
 # --- Rule path: severity vocabulary ---

@@ -23,24 +23,20 @@ lands.
 import os
 import random
 import numpy as np
-from pathlib import Path
 
+from hlab.datasets import PV_FAULT_FOLDER, PV_FOLDERS, write_manifest
+from hlab.paths import PREPROCESSED, RAW, ROOT
 from hlab.transform import load_gray, normalize, to_model_input
 
 # --- Config ---
-ROOT = Path(__file__).resolve().parent.parent
-INPUT_DIR = ROOT / "data" / "CA_Training_Data"
-OUTPUT_DIR = ROOT / "data" / "CA_Preprocessed" / "pv"
+INPUT_DIR = RAW
+OUTPUT_DIR = PREPROCESSED / "pv"
 HOLDOUT_FRACTION = 0.10
 RANDOM_SEED = 42
 
-PV_TRAIN_FOLDERS = [
-    "pv_om_inspection",
-    "pv_thermal_inspection",
-]
-
-# Name of the fault subfolder under test/fault/. Waiting on HER-87.
-PV_TEST_FAULT_FOLDER = "pv"
+# Which raw folders feed the PV pools is declared once, in hlab.datasets.
+PV_TRAIN_FOLDERS = list(PV_FOLDERS["pv"])
+PV_TEST_FAULT_FOLDER = PV_FAULT_FOLDER
 
 
 def collect_files(folders, base_subpath):
@@ -169,18 +165,19 @@ def main():
     print(f"\nSaved PV norm stats: {stats_path}")
     print(f"  mean={global_mean:.4f}, std={global_std:.4f}")
 
-    # ---- Persist the file-index split for reproducibility ----
+    # ---- Persist the file-index split for reproducibility (hlab.datasets reads it) ----
     split_manifest = OUTPUT_DIR / "split_manifest.txt"
-    with split_manifest.open("w", encoding="utf-8") as f:
-        f.write(f"# PV specialist split manifest\n")
-        f.write(f"# seed={RANDOM_SEED}, holdout_fraction={HOLDOUT_FRACTION}\n")
-        f.write(f"# {len(train_paths)} train / {len(holdout_paths)} holdout\n\n")
-        f.write("[TRAIN]\n")
-        for _label, p in train_paths:
-            f.write(f"{p.relative_to(ROOT).as_posix()}\n")
-        f.write("\n[HOLDOUT]\n")
-        for _label, p in holdout_paths:
-            f.write(f"{p.relative_to(ROOT).as_posix()}\n")
+    sections = {
+        "TRAIN": [p.relative_to(ROOT).as_posix() for _label, p in train_paths],
+        "HOLDOUT": [p.relative_to(ROOT).as_posix() for _label, p in holdout_paths],
+    }
+    if fault_dir.exists() and any(fault_dir.iterdir()):
+        sections["FAULT"] = [p.relative_to(ROOT).as_posix() for _label, p in fault_files]
+    write_manifest(split_manifest, sections, header=[
+        "PV specialist split manifest",
+        f"seed={RANDOM_SEED}, holdout_fraction={HOLDOUT_FRACTION}",
+        f"{len(train_paths)} train / {len(holdout_paths)} holdout",
+    ])
     print(f"Saved split manifest: {split_manifest}")
 
     print("\nDone.")

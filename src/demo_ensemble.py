@@ -43,30 +43,19 @@ except Exception:
     pass
 
 import numpy as np
-import torch
 import matplotlib.pyplot as plt
 from matplotlib import patches as mpatches
 from PIL import Image
 
-from train_autoencoder import ThermalAutoencoder
-from hlab.transform import denormalize, load_gray, normalize, to_model_input
+from hlab.bundle import Bundle
+from hlab.paths import RAW, RESULTS
+from hlab.transform import load_gray, to_model_input
 from hlab.rules import DEFAULT_CONFIG_PATH, RuleConfig, combine, evaluate
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data" / "CA_Preprocessed"
-TRAINING_DATA_DIR = ROOT / "data" / "CA_Training_Data"
-MODEL_DIR = ROOT / "models"
-RESULTS_DIR = ROOT / "results"
-OUT_DIR = RESULTS_DIR / "demo"
-# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DEVICE = torch.device("cpu")
-
-
-# Default model config (v2 multi-equipment). --model pv overrides these in main().
-MODEL_WEIGHTS = MODEL_DIR / "autoencoder_best.pth"
-NORM_STATS_PATH = DATA_DIR / "norm_stats.npy"
-# Default ML threshold (v2's F1-optimized cutoff from results/eval_metrics.npy)
-ML_THRESHOLD = 0.000339
+TRAINING_DATA_DIR = RAW
+DEMO_DIR = RESULTS / "demo"
+# The demo runs on CPU on purpose, so its numbers do not depend on a GPU being present.
+DEVICE = "cpu"
 
 # Curated demo samples — transformer (v2 model) arc.
 # Filenames verified against the actual CA_Training_Data test folders.
@@ -94,10 +83,8 @@ DEFAULT_SAMPLES_PV = [
 DEFAULT_SAMPLES_BY_MODEL = {
     "v2": DEFAULT_SAMPLES_V2,
     "pv": DEFAULT_SAMPLES_PV,
+    "pv_om": DEFAULT_SAMPLES_PV,
 }
-
-# Back-compat alias; rebound in main() based on --model.
-DEFAULT_SAMPLES = DEFAULT_SAMPLES_V2
 
 
 # --- Display helpers ---
@@ -121,28 +108,32 @@ def load_original_for_display(path):
     return arr.astype(np.float32), "mono"
 
 
-# --- ML path ---
+# --- ML path + ensemble ---
 
-def run_ml_inference(model, normed):
-    """Returns (recon_normed, per_pixel_err, mean_err)."""
-    x = torch.from_numpy(normed[np.newaxis, np.newaxis, :, :]).float().to(DEVICE)
-    with torch.no_grad():
-        recon = model(x)
-    recon_np = recon.squeeze().cpu().numpy()
-    err = (normed - recon_np) ** 2
+def ml_verdict(mean_err, threshold):
+    if mean_err > threshold:
+        return "FAULT", f"MSE {mean_err:.6f} > threshold {threshold:.6f}"
+    return "NORMAL", f"MSE {mean_err:.6f} ≤ threshold {threshold:.6f}"
+
+
+def decide_image(bundle, raw, equipment, config):
+    """Both layers on one 0-255 model input; no I/O, no rendering.
+
+    Returns (recon_0_255, err_map, mean_err, ml, ml_reason, verdict, decision).
+    `bundle` is anything with the hlab.bundle interface (a FakeBundle in tests).
+    """
+    recon, err = bundle.reconstruct(raw)
+    recon, err = recon[0], err[0]
     mean_err = float(err.mean())
-    return recon_np, err, mean_err
-
-
-def ml_verdict(mean_err):
-    if mean_err > ML_THRESHOLD:
-        return "FAULT", f"MSE {mean_err:.6f} > threshold {ML_THRESHOLD:.6f}"
-    return "NORMAL", f"MSE {mean_err:.6f} ≤ threshold {ML_THRESHOLD:.6f}"
+    ml, ml_reason = ml_verdict(mean_err, bundle.require_threshold())
+    verdict = evaluate(config, raw, equipment)
+    decision = combine(ml == "FAULT", verdict)
+    return recon, err, mean_err, ml, ml_reason, verdict, decision
 
 
 # --- Visualization ---
 
-def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
+def render_panel(path, equipment, raw, recon_denorm, err, mean_err, threshold,
                  ml, ml_reason, verdict, decision, out_path, title_suffix=""):
     """Six-panel figure. `verdict` is a hlab.rules.RuleVerdict, `decision` a Decision."""
     fig = plt.figure(figsize=(18, 4.2))
@@ -211,7 +202,7 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
         ("─── ML Layer ───", "#1f4e79", "bold"),
         (f"  Verdict: {ml}", ml_color, "bold"),
         (f"  Mean MSE: {mean_err:.6f}", "black", "normal"),
-        (f"  Threshold: {ML_THRESHOLD:.6f}", "grey", "normal"),
+        (f"  Threshold: {threshold:.6f}", "grey", "normal"),
         ("", "black", "normal"),
         ("─── Rule-Based Layer ───", "#e67e22", "bold"),
         (f"  Verdict: {verdict.severity}", verdict.color, "bold"),
@@ -265,26 +256,20 @@ def render_panel(path, equipment, raw, recon_denorm, err, mean_err,
 
 # --- Main pipeline ---
 
-def run_one(path, equipment, expected, model, stats, idx, config):
+def run_one(path, equipment, expected, bundle, idx, config, out_dir):
     # Same transform as preprocessing (hlab.transform), so the model sees what it trained on.
     raw = to_model_input(load_gray(path))
-    normed = normalize(raw, stats)
-    recon_normed, err, mean_err = run_ml_inference(model, normed)
-    recon_denorm = denormalize(recon_normed, stats)
-
-    ml, ml_reason = ml_verdict(mean_err)
-    verdict = evaluate(config, raw, equipment)
-    decision = combine(ml == "FAULT", verdict)
+    recon_denorm, err, mean_err, ml, ml_reason, verdict, decision = decide_image(bundle, raw, equipment, config)
 
     # Console output
     print(f"\n[{idx}] {path.parent.name}/{path.name}  (expected: {expected}, equipment: {equipment})")
-    print(f"    ML   : {ml}   (MSE {mean_err:.6f} vs threshold {ML_THRESHOLD:.6f})")
+    print(f"    ML   : {ml}   (MSE {mean_err:.6f} vs threshold {bundle.threshold:.6f})")
     print(f"    RULE : {verdict.severity}   — {verdict.explanation}")
     print(f"    FINAL: {decision.label}")
 
-    out_path = OUT_DIR / f"demo_{idx:02d}_{equipment}_{expected}_{path.stem}.png"
+    out_path = out_dir / f"demo_{idx:02d}_{equipment}_{expected}_{path.stem}.png"
     render_panel(
-        path, equipment, raw, recon_denorm, err, mean_err,
+        path, equipment, raw, recon_denorm, err, mean_err, bundle.threshold,
         ml, ml_reason, verdict, decision, out_path,
         title_suffix=f"expected {expected}",
     )
@@ -304,33 +289,15 @@ def main():
                              f"{DEFAULT_CONFIG_PATH.name} (IEC / manufacturer values). "
                              "Point this at a utility's SCADA setpoints to swap them in.")
     parser.add_argument("--model", type=str, default="v2",
-                        choices=["v2", "pv"],
-                        help="Which autoencoder + norm stats to load. 'v2' = multi-equipment baseline, 'pv' = PV specialist.")
+                        choices=sorted(DEFAULT_SAMPLES_BY_MODEL),
+                        help="Which bundle (weights, norm stats, calibrated threshold) to load. "
+                             "'v2' = multi-equipment baseline, 'pv' = PV specialist, 'pv_om' = O&M-only PV specialist.")
     parser.add_argument("--expected", type=str, default="unknown",
                         help="Expected label for the input image (cosmetic).")
     args = parser.parse_args()
 
-    # Resolve model-specific paths, threshold, and curated sample set
-    global ML_THRESHOLD, OUT_DIR, DEFAULT_SAMPLES
-    DEFAULT_SAMPLES = DEFAULT_SAMPLES_BY_MODEL[args.model]
-    if args.model == "pv":
-        pv_dir = DATA_DIR / "pv"
-        norm_stats_path = pv_dir / "norm_stats.npy"
-        weights_path = MODEL_DIR / "autoencoder_pv_best.pth"
-        pv_metrics_path = RESULTS_DIR / "pv_eval_metrics.npy"
-        if pv_metrics_path.exists():
-            pv_metrics = np.load(pv_metrics_path, allow_pickle=True).item()
-            ML_THRESHOLD = float(pv_metrics["threshold"])
-            print(f"Loaded PV threshold {ML_THRESHOLD:.6f} from eval metrics")
-        else:
-            # Fallback until evaluate_autoencoder_pv.py runs
-            ML_THRESHOLD = 0.001
-            print(f"PV eval metrics not found; using fallback threshold {ML_THRESHOLD:.6f}")
-            print(f"  (Run src/evaluate_autoencoder_pv.py after fault data lands to calibrate.)")
-        OUT_DIR = RESULTS_DIR / "demo" / "pv"
-    else:
-        norm_stats_path = NORM_STATS_PATH
-        weights_path = MODEL_WEIGHTS
+    samples = DEFAULT_SAMPLES_BY_MODEL[args.model]
+    out_dir = DEMO_DIR if args.model == "v2" else DEMO_DIR / args.model
 
     # Rule-layer thresholds. Load + validate before touching the model so a bad
     # config fails in a second instead of after weights are on the device.
@@ -345,7 +312,7 @@ def main():
     if args.image:
         needed = {args.equipment}
     else:
-        needed = {equipment for _path, equipment, _expected in DEFAULT_SAMPLES}
+        needed = {equipment for _path, equipment, _expected in samples}
     try:
         for equipment in sorted(needed):
             config.equipment(equipment)
@@ -353,32 +320,35 @@ def main():
         print(f"ERROR: {exc}")
         return 1
 
-    # Norm stats + model
-    stats = np.load(norm_stats_path, allow_pickle=True).item()
-    print(f"Device: {DEVICE}")
-    print(f"Model:  {args.model} ({weights_path.name})")
-    print(f"Norm stats: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
-
-    model = ThermalAutoencoder().to(DEVICE)
-    model.load_state_dict(torch.load(weights_path, weights_only=True))
-    model.eval()
-    print(f"Loaded {weights_path.name}\n")
+    # Bundle: weights, norm stats and the evaluator's calibrated threshold, resolved together.
+    try:
+        bundle = Bundle.load(args.model, device=DEVICE)
+        bundle.require_threshold()
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    print(f"Device: {bundle.device}")
+    print(f"Model:  {args.model} ({bundle.weights.name})")
+    print(f"Norm stats: mean={bundle.stats['mean']:.4f}, std={bundle.stats['std']:.4f}")
+    print(f"ML threshold: {bundle.threshold:.6f} ({bundle.metrics_path.name})")
+    bundle.model
+    print(f"Loaded {bundle.weights.name}\n")
 
     if args.image:
         path = Path(args.image)
         if not path.exists():
             print(f"ERROR: image not found: {path}")
             return 1
-        run_one(path, args.equipment, args.expected, model, stats, idx=1, config=config)
+        run_one(path, args.equipment, args.expected, bundle, idx=1, config=config, out_dir=out_dir)
     else:
         print("Running curated sample set (4 images)...")
-        for i, (path, equipment, expected) in enumerate(DEFAULT_SAMPLES, 1):
+        for i, (path, equipment, expected) in enumerate(samples, 1):
             if not path.exists():
                 print(f"  SKIP [{i}] {path}: not found")
                 continue
-            run_one(path, equipment, expected, model, stats, idx=i, config=config)
+            run_one(path, equipment, expected, bundle, idx=i, config=config, out_dir=out_dir)
 
-    print(f"\nVisualizations saved to: {OUT_DIR}/")
+    print(f"\nVisualizations saved to: {out_dir}/")
     return 0
 
 
