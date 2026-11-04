@@ -15,6 +15,8 @@ Resolution (until the layout moves again, this table is the only place that know
   pv_om       autoencoder_pv_om_best.pth        pv_om/norm_stats.npy            pv_om_eval_metrics.npy
   india       autoencoder_india_best.pth        india/norm_stats.npy            india_eval_metrics.npy
   india_temp  autoencoder_india_temp_best.pth   india_temp/norm_stats.npy       india_temp_eval_metrics.npy
+  india_panel autoencoder_india_panel_best.pth  india_temp/norm_stats.npy       india_panel_eval_metrics.npy
+  india_inpaint inpaint_india_best.pth          india_temp/norm_stats.npy       india_inpaint_eval_metrics.npy
 
 A missing eval-metrics file gives threshold None; callers that need one call
 require_threshold(), which says which evaluator to run. No threshold literal
@@ -35,6 +37,8 @@ BUNDLES = {
     "pv_om": ("autoencoder_pv_om_best.pth", "pv_om", "pv_om_eval_metrics.npy"),
     "india": ("autoencoder_india_best.pth", "india", "india_eval_metrics.npy"),
     "india_temp": ("autoencoder_india_temp_best.pth", "india_temp", "india_temp_eval_metrics.npy"),
+    "india_panel": ("autoencoder_india_panel_best.pth", "india_temp", "india_panel_eval_metrics.npy"),
+    "india_inpaint": ("inpaint_india_best.pth", "india_temp", "india_inpaint_eval_metrics.npy"),
 }
 
 

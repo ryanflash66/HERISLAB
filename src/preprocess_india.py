@@ -2,13 +2,12 @@
 Preprocess the Thermal-Library India split (HER-82, milestone 06).
 
 Reads docs/data_manifests/india_plot_split.csv (HER-18) and, for every frame:
-  1. raw 16-bit counts from the R-JPG (src/flir_rjpg.py)
-  2. min-max scale per frame to 0-255  (same rule as load_image_raw for 16-bit
-     files; both classes come from one camera, so the 8-bit vs 16-bit gap
-     should not separate healthy from faulty here. Per-frame stretching still
-     discards absolute temperature.)
-  3. resize to 320x240 (LANCZOS)
-  4. z-score with mean/std from the TRAIN split only
+  1. raw 16-bit counts from the R-JPG (hlab.rjpg)
+  2. min-max scale per frame to 0-255 and resize to 320x240 (LANCZOS):
+     hlab.transform.to_model_input(raw, "minmax"). Both classes come from one
+     camera, so the 8-bit vs 16-bit gap should not separate healthy from faulty
+     here. Per-frame stretching still discards absolute temperature.
+  3. z-score with mean/std from the TRAIN split only
 
 Also records per-frame temperatures in degrees C (median, p99, max) for the
 rule layer and baselines. Certified FLIR Vue Pro frames get NaN temperatures
@@ -25,24 +24,15 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from flir_rjpg import read_rjpg, raw_to_celsius  # noqa: E402
+from hlab.paths import MANIFESTS, PREPROCESSED, ROOT  # noqa: E402
+from hlab.rjpg import raw_to_celsius, read_rjpg  # noqa: E402
+from hlab.transform import to_model_input  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-SPLIT_CSV = ROOT / "docs" / "data_manifests" / "india_plot_split.csv"
-OUT = ROOT / "data" / "CA_Preprocessed" / "india"
-TARGET_SIZE = (320, 240)
+SPLIT_CSV = MANIFESTS / "india_plot_split.csv"
+OUT = PREPROCESSED / "india"
 SPLITS = ["train", "val", "test", "cross_site"]
-
-
-def to_model_input(raw):
-    a = raw.astype(np.float32)
-    lo, hi = a.min(), a.max()
-    a = (a - lo) / (hi - lo) * 255.0 if hi > lo else np.zeros_like(a)
-    img = Image.fromarray(a, mode="F").resize(TARGET_SIZE, Image.LANCZOS)
-    return np.asarray(img, dtype=np.float32)
 
 
 def main():
@@ -55,7 +45,7 @@ def main():
         if s not in SPLITS:
             continue                      # train_faulty_unused
         raw, calib = read_rjpg(ROOT / r["rel_path"])
-        arrays[s].append(to_model_input(raw))
+        arrays[s].append(to_model_input(raw, "minmax"))
         if r["camera"].startswith("FLIR"):
             tm = tp = tx = float("nan")
         else:

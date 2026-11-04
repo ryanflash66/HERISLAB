@@ -1,22 +1,23 @@
 """
 Train the autoencoder on the Thermal-Library India train plot (milestone 06).
 
-Changes vs train_autoencoder_pv.py:
+Changes vs the PV recipe:
   - data: data/CA_Preprocessed/india/train.npy (plot 17, healthy only; HER-18/82)
   - early-stopping hold-out is whole FLIGHTS of plot 17 (~10% of frames), not
-    random frames, so it has no near-copies in training (HER-18)
+    random frames, so it has no near-copies in training (HER-18;
+    hlab.datasets.flight_holdout)
   - HER-106 fix for the epoch-6 loss spike: lr 3e-4 (was 1e-3) + gradient
     clipping at norm 1.0
-Architecture unchanged (ThermalAutoencoder from train_autoencoder.py).
+Architecture unchanged (hlab.model.ThermalAutoencoder). The same recipe is the
+"india" entry of config/training.json (src/train.py --config india), kept here
+as the run that produced models/autoencoder_india_best.pth.
 
 Outputs: models/autoencoder_india_best.pth, _final.pth
          results/india/training_log.txt (via stdout redirect)
 """
-import csv
-import random
+import argparse
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -24,40 +25,23 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_autoencoder import ThermalAutoencoder  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hlab.datasets import Dataset, flight_holdout  # noqa: E402
+from hlab.model import ThermalAutoencoder  # noqa: E402
+from hlab.panels import resolve_device  # noqa: E402
+from hlab.paths import MODELS  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data" / "CA_Preprocessed" / "india"
-MODELS = ROOT / "models"
 SEED, BATCH_SIZE, EPOCHS, PATIENCE = 42, 32, 50, 10
 LEARNING_RATE, GRAD_CLIP, HOLDOUT_FRAC = 3e-4, 1.0, 0.10
 
 
-def flight_holdout(meta):
-    """Pick whole flights until ~HOLDOUT_FRAC of frames are held out."""
-    by_flight = defaultdict(list)
-    for i, m in enumerate(meta):
-        by_flight[m["flight"]].append(i)
-    flights = sorted(by_flight)
-    random.Random(SEED).shuffle(flights)
-    target, held, chosen = HOLDOUT_FRAC * len(meta), [], []
-    for f in flights:
-        if len(held) >= target:
-            break
-        held += by_flight[f]; chosen.append(f)
-    held_set = set(held)
-    train_idx = [i for i in range(len(meta)) if i not in held_set]
-    return np.array(train_idx), np.array(sorted(held)), chosen
-
-
-def main():
+def main(device=None):
     torch.manual_seed(SEED); np.random.seed(SEED)
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x = np.load(DATA / "train.npy")
-    meta = list(csv.DictReader(open(DATA / "train_meta.csv", encoding="utf-8")))
+    dev = resolve_device(device)
+    s = Dataset("india").split("train")
+    x, meta = s.x, s.meta
     assert len(meta) == len(x) and all(m["label"] == "healthy" for m in meta)
-    tr, ho, flights = flight_holdout(meta)
+    tr, ho, flights = flight_holdout(meta, HOLDOUT_FRAC, SEED)
     print(f"device {dev} | train frames {len(tr)} | early-stop hold-out {len(ho)} frames from flights {flights}", flush=True)
 
     t = torch.from_numpy(x).unsqueeze(1)
@@ -105,4 +89,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(); ap.add_argument("--device", default=None)
+    main(ap.parse_args().device)

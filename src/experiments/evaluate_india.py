@@ -15,65 +15,26 @@ Evaluate the India autoencoder (milestone 06: HER-97, HER-98).
 
 Outputs: results/india/eval_log.txt (stdout), results/india/{split}_errors.npy
 """
-import csv
+import argparse
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_autoencoder import ThermalAutoencoder  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hlab.bundle import Bundle  # noqa: E402
+from hlab.datasets import Dataset  # noqa: E402
+from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion  # noqa: E402
+from hlab.panels import resolve_device  # noqa: E402
+from hlab.paths import RESULTS  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data" / "CA_Preprocessed" / "india"
-RES = ROOT / "results" / "india"
-WEIGHTS = ROOT / "models" / "autoencoder_india_best.pth"
-
-
-def auroc(score, y):
-    """Mann-Whitney AUROC, ties counted half. y: 1 = faulty."""
-    score, y = np.asarray(score, float), np.asarray(y, int)
-    order = score.argsort(); ranks = np.empty(len(score)); ranks[order] = np.arange(1, len(score) + 1)
-    for v in np.unique(score):                       # average ranks for ties
-        m = score == v
-        if m.sum() > 1: ranks[m] = ranks[m].mean()
-    n1, n0 = y.sum(), len(y) - y.sum()
-    return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+RES = RESULTS / "india"
 
 
-def boot_ci(score, y, n=1000, seed=0):
-    rng, out = np.random.default_rng(seed), []
-    i1, i0 = np.where(y == 1)[0], np.where(y == 0)[0]
-    for _ in range(n):
-        idx = np.concatenate([rng.choice(i1, len(i1)), rng.choice(i0, len(i0))])
-        out.append(auroc(score[idx], y[idx]))
-    return np.percentile(out, [2.5, 97.5])
-
-
-def at_threshold(score, y, thr):
-    p = score > thr
-    tp = int((p & (y == 1)).sum()); fp = int((p & (y == 0)).sum())
-    fn = int((~p & (y == 1)).sum()); tn = int((~p & (y == 0)).sum())
-    prec = tp / (tp + fp) if tp + fp else 0.0
-    rec = tp / (tp + fn) if tp + fn else 0.0
-    f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
-    spec = tn / (tn + fp) if tn + fp else 0.0
-    return dict(tp=tp, fp=fp, fn=fn, tn=tn, precision=prec, recall=rec, f1=f1, specificity=spec)
-
-
-def best_f1_threshold(score, y):
-    cands = np.unique(score)
-    if len(cands) > 2000:
-        cands = np.quantile(score, np.linspace(0, 1, 2001))
-    return max(cands, key=lambda t: at_threshold(score, y, t)["f1"])
-
-
-def load(split):
-    x = np.load(DATA / f"{split}.npy")
-    meta = list(csv.DictReader(open(DATA / f"{split}_meta.csv", encoding="utf-8")))
-    y = np.array([1 if m["label"] == "faulty" else 0 for m in meta])
-    return x, meta, y
+def load(ds, split):
+    s = ds.split(split)
+    return s.x, s.meta, s.labels
 
 
 def errors(model, x, dev):
@@ -100,13 +61,13 @@ def baselines(x, meta):
     }
 
 
-def main():
+def main(device=None):
     RES.mkdir(parents=True, exist_ok=True)
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ThermalAutoencoder().to(dev)
-    model.load_state_dict(torch.load(WEIGHTS, map_location=dev)); model.eval()
+    dev = resolve_device(device)
+    model = Bundle.load("india", dev).model
+    ds = Dataset("india")
 
-    data = {s: load(s) for s in ("val", "test", "cross_site")}
+    data = {s: load(ds, s) for s in ("val", "test", "cross_site")}
     err = {}
     for s, (x, meta, y) in data.items():
         err[s] = errors(model, x, dev)
@@ -120,9 +81,9 @@ def main():
         print(f"######## score = {score} pixel error ({tag}); threshold from VAL: {thr:.6f}\n")
         for s in ("val", "test", "cross_site"):
             y = data[s][2]; e = err[s][score]
-            m = at_threshold(e, y, thr)
-            flag_all = at_threshold(np.ones(len(y)), y, 0)["f1"]
-            ci = boot_ci(e, y) if s == "test" else None
+            m = confusion(e, y, thr)
+            flag_all = confusion(np.ones(len(y)), y, 0)["f1"]
+            ci = auroc_ci(e, y, n_boot=1000, seed=0) if s == "test" else None
             print(f"== {s.upper()}  ({len(y)-y.sum()} healthy / {y.sum()} faulty)")
             print(f"  AUROC {auroc(e, y):.3f}" + (f"  (95% CI {ci[0]:.3f} to {ci[1]:.3f})" if ci is not None else ""))
             print(f"  at frozen threshold: precision {m['precision']:.3f}  recall {m['recall']:.3f}  "
@@ -143,4 +104,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(); ap.add_argument("--device", default=None, help="cpu or cuda (default: cuda when available)")
+    main(ap.parse_args().device)

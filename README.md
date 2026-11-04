@@ -48,7 +48,8 @@ Output (1x240x320) reconstructed image
 ```
 HERISLAB/
 ├── src/
-│   ├── hlab/                     # Shared library: paths, transform, datasets, model, bundle, metrics, rules, train
+│   ├── hlab/                     # Shared library: paths, transform, datasets, model, bundle, metrics, rules, train, panels, rjpg
+│   ├── experiments/              # India (Thermal-Library) experiment scripts: leaves that import hlab only
 │   ├── preprocess.py             # Image loading, normalization, train/test split
 │   ├── train.py                  # Trains one entry of config/training.json
 │   └── evaluate_autoencoder.py   # Threshold calibration, AUROC, F1 metrics
