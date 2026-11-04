@@ -1,9 +1,8 @@
 """
 HER-114 retrain: validity controls for the O&M-only PV specialist.
 
-Runs the same controls as audit_her114_reruns.py (metrics from hlab.metrics,
-features and baselines from audit_eval_validity.py) on the errors of the model
-trained WITHOUT the THM aerial-survey frames:
+Runs the same checks as audit_her114_reruns.py (audit.run_scenario) on the
+errors of the model trained WITHOUT the THM aerial-survey frames:
 
   split      data/CA_Preprocessed/pv_om/split_manifest.txt   (seed 42, O&M only)
   checkpoint models/autoencoder_pv_om_best.pth               (seed 43)
@@ -33,23 +32,28 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import audit_eval_validity as A  # noqa: E402
-import audit_her114_reruns as R  # noqa: E402
+from audit import PVInputs, print_scenario, rounded, run_scenario, write_summary  # noqa: E402
 from hlab.bundle import Bundle  # noqa: E402
 from hlab.datasets import Dataset  # noqa: E402
 from hlab.metrics import confusion, from_groups  # noqa: E402
+from hlab.paths import RESULTS  # noqa: E402
 
-ROOT = A.ROOT
-OUT = A.RES / "her-114_retrain"
-PREV = A.RES / "her-114" / "rerun_summary.csv"
+OUT = RESULTS / "her-114_retrain"
+PREV = RESULTS / "her-114" / "rerun_summary.csv"
+COLS = ["model", "scenario", "n_healthy", "n_thm", "threshold", "auroc_files", "auroc_files_ci",
+        "auroc_unique", "auroc_unique_ci", "fp_files", "recall_files", "precision_files", "f1_saved_files",
+        "f1_trivial_files", "f1_trivial_unique", "auroc_source", "auroc_source_def", "p1_baseline",
+        "best_single", "logreg16", "leak_adjacent", "thm_flag_rate_holdout84", "thm_flag_rate_all"]
 
 
-def load_inputs():
+def load_inputs(bundle):
     ds = Dataset("pv_om")
     assert not any(src == "thm" for _f, _split, src in ds.manifest()), "THM frame found in the O&M-only split"
-    D = R.load_inputs(ds, errors_prefix="pv_om")
-    print(f"O&M-only split: {D['n_train']} train / {len(D['ho'])} holdout; "
-          f"faults {len(D['pvf'])} files / {D['n_unique']} unique")
+    D = PVInputs(ds, bundle)
+    print("Computing global image statistics (no model)...")
+    D.features()
+    print(f"O&M-only split: {D.n_train} train / {len(D.ho)} holdout; "
+          f"faults {len(D.pos)} files / {D.n_unique} unique")
     return D
 
 
@@ -63,9 +67,10 @@ def main():
         print("=" * 70, "\nHER-114 retrain: O&M-only PV specialist\n" + "=" * 70)
         print(f"threshold used below ('saved threshold' in the printout) = re-tuned best-F1 "
               f"threshold of the O&M-only model: {thr:.6f}")
-        D = load_inputs()
-        S = R.run_scenario("retrain_om_only", np.ones(len(D["ho"]), bool), D, thr)
-        c = A.rounded(confusion(*from_groups(D["pvn"], D["pvf"]), thr))
+        D = load_inputs(om)
+        S = run_scenario("retrain_om_only", np.ones(len(D.ho), bool), D, thr)
+        print_scenario(S)
+        c = rounded(confusion(*from_groups(D.neg, D.pos), thr))
         print(f"\nre-tuned threshold {thr:.6f}: {c}")
         print(f"THM flag rate at that threshold: all 1,075 frames {M['thm_flag_rate_all']:.1%}; "
               f"the 84 frames held out by the original split {M['thm_flag_rate_holdout84']:.1%}")
@@ -78,30 +83,18 @@ def main():
     S["thm_flag_rate_all"] = f"{M['thm_flag_rate_all']:.1%}"
     S["model"] = "O&M-only retrain (seed 43), 7,052 O&M train frames"
 
+    pv_thr = Bundle.load("pv").require_threshold()
     rows = []
     with PREV.open(encoding="utf-8") as fh:
         prev = {r["scenario"]: r for r in csv.DictReader(fh)}
     for key, model in [("a_as_is", "THM+O&M model, holdout as is"),
                        ("b_thm_removed", "THM+O&M model, THM dropped at evaluation")]:
-        r = dict(prev[key]); r["model"] = model; r["threshold"] = f"{A.PV_THR:.6f}"
+        r = dict(prev[key]); r["model"] = model; r["threshold"] = f"{pv_thr:.6f}"
         r["thm_flag_rate_holdout84"] = "96.4% (81/84)" if key == "a_as_is" else "n/a (not scored)"
         r["thm_flag_rate_all"] = "n/a"
         rows.append(r)
     rows.append(S)
-
-    cols = ["model", "scenario", "n_healthy", "n_thm", "threshold", "auroc_files", "auroc_files_ci",
-            "auroc_unique", "auroc_unique_ci", "fp_files", "recall_files", "precision_files", "f1_saved_files",
-            "f1_trivial_files", "f1_trivial_unique", "auroc_source", "auroc_source_def", "p1_baseline",
-            "best_single", "logreg16", "leak_adjacent", "thm_flag_rate_holdout84", "thm_flag_rate_all"]
-    md = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
-    for r in rows:
-        md.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
-    (OUT / "summary.md").write_text("\n".join(md) + "\n", encoding="utf-8")
-    with (OUT / "summary.csv").open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols); w.writeheader()
-        for r in rows:
-            w.writerow({c: r.get(c, "") for c in cols})
-    print("\n".join(md))
+    print(write_summary(rows, COLS, OUT / "summary.md", OUT / "summary.csv"))
 
 
 if __name__ == "__main__":
