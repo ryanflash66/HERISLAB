@@ -18,6 +18,12 @@ land on both sides; the "test" set is not independent of training:
 When `data/CA_Training_Data/test/fault/pv/` exists and is non-empty, this
 script also emits test_fault.npy. Until then, rerun after the fault dataset
 lands.
+
+main() takes the output folder, the healthy folders, the representation and
+the fit (hlab.transform), so the variants (preprocess_pv_om.py,
+preprocess_pv_matched.py) pass arguments instead of patching module globals.
+This script's own run keeps "scale_by_max" + "stretch", the transform the
+stored pv/ arrays and the PV specialist were made with.
 """
 
 import os
@@ -54,18 +60,19 @@ def collect_files(folders, base_subpath):
     return out
 
 
-def load_arrays(paths, label):
+def load_arrays(paths, label, representation="scale_by_max", fit="stretch"):
     """Load all (folder, path) tuples as 0-255 model-input arrays, with progress.
 
-    Same transform as preprocess.py (hlab.transform, representation
-    "scale_by_max"), so the 16-bit / 8-bit format gap (HER-107) is shared, not copied.
+    hlab.transform with the given representation and fit, the same for healthy
+    and fault files. The defaults are preprocess.py's ("scale_by_max",
+    "stretch"), which carry the 16-bit / 8-bit format gap (HER-107).
     """
     arrs = []
     skipped = 0
     total = len(paths)
     for i, (_folder, fpath) in enumerate(paths):
         try:
-            arrs.append(to_model_input(load_gray(fpath)))
+            arrs.append(to_model_input(load_gray(fpath), representation, fit))
         except Exception as e:
             print(f"  SKIP {fpath.name}: {e}")
             skipped += 1
@@ -74,21 +81,24 @@ def load_arrays(paths, label):
     return arrs, skipped
 
 
-def main():
+def main(output_dir=OUTPUT_DIR, folders=PV_TRAIN_FOLDERS, representation="scale_by_max", fit="stretch"):
+    folders = list(folders)
     print("=" * 60)
     print("PV-SPECIALIST PREPROCESSING (HER-88)")
     print("=" * 60)
+    print(f"  Healthy folders:  {folders}")
+    print(f"  Transform:        representation={representation}, fit={fit}")
     print(f"  Holdout fraction: {HOLDOUT_FRACTION:.0%}")
     print(f"  Random seed:      {RANDOM_SEED}")
-    print(f"  Output dir:       {OUTPUT_DIR}")
+    print(f"  Output dir:       {output_dir}")
     print()
 
     # ---- Phase 1: collect PV normals and split deterministically ----
     print("Phase 1: collecting PV normal file paths...")
-    pv_files = collect_files(PV_TRAIN_FOLDERS, base_subpath="train/normal")
+    pv_files = collect_files(folders, base_subpath="train/normal")
     n = len(pv_files)
     print(f"  Total PV normal images: {n}")
-    for folder in PV_TRAIN_FOLDERS:
+    for folder in folders:
         count = sum(1 for (f, _) in pv_files if f == folder)
         print(f"    {folder}: {count}")
 
@@ -109,7 +119,7 @@ def main():
 
     # ---- Phase 2: load training arrays, compute PV-only norm stats ----
     print("\nPhase 2: loading training images...")
-    train_arrs, train_skipped = load_arrays(train_paths, "train")
+    train_arrs, train_skipped = load_arrays(train_paths, "train", representation, fit)
     if not train_arrs:
         print("ERROR: no training arrays loaded")
         return
@@ -125,19 +135,19 @@ def main():
 
     # ---- Phase 3: z-score normalize and save train ----
     print("\nPhase 3: normalizing and saving train_normal...")
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     train_normed = normalize(train_arr, stats)
-    np.save(OUTPUT_DIR / "train_normal.npy", train_normed.astype(np.float32))
-    print(f"  Saved: {OUTPUT_DIR / 'train_normal.npy'}  shape {train_normed.shape}")
+    np.save(output_dir / "train_normal.npy", train_normed.astype(np.float32))
+    print(f"  Saved: {output_dir / 'train_normal.npy'}  shape {train_normed.shape}")
     del train_arrs, train_arr, train_normed
 
     # ---- Phase 4: holdout test normals ----
     print("\nPhase 4: loading + normalizing holdout test normals...")
-    holdout_arrs, holdout_skipped = load_arrays(holdout_paths, "holdout")
+    holdout_arrs, holdout_skipped = load_arrays(holdout_paths, "holdout", representation, fit)
     holdout_arr = np.stack(holdout_arrs, axis=0)
     holdout_normed = normalize(holdout_arr, stats)
-    np.save(OUTPUT_DIR / "test_normal.npy", holdout_normed.astype(np.float32))
-    print(f"  Saved: {OUTPUT_DIR / 'test_normal.npy'}  shape {holdout_normed.shape}  (skipped {holdout_skipped})")
+    np.save(output_dir / "test_normal.npy", holdout_normed.astype(np.float32))
+    print(f"  Saved: {output_dir / 'test_normal.npy'}  shape {holdout_normed.shape}  (skipped {holdout_skipped})")
     del holdout_arrs, holdout_arr, holdout_normed
 
     # ---- Phase 5: PV fault (if sourced via HER-87) ----
@@ -145,12 +155,12 @@ def main():
     if fault_dir.exists() and any(fault_dir.iterdir()):
         print(f"\nPhase 5: loading PV fault test set from {fault_dir}...")
         fault_files = collect_files([PV_TEST_FAULT_FOLDER], base_subpath="test/fault")
-        fault_arrs, fault_skipped = load_arrays(fault_files, "fault")
+        fault_arrs, fault_skipped = load_arrays(fault_files, "fault", representation, fit)
         if fault_arrs:
             fault_arr = np.stack(fault_arrs, axis=0)
             fault_normed = normalize(fault_arr, stats)
-            np.save(OUTPUT_DIR / "test_fault.npy", fault_normed.astype(np.float32))
-            print(f"  Saved: {OUTPUT_DIR / 'test_fault.npy'}  shape {fault_normed.shape}  (skipped {fault_skipped})")
+            np.save(output_dir / "test_fault.npy", fault_normed.astype(np.float32))
+            print(f"  Saved: {output_dir / 'test_fault.npy'}  shape {fault_normed.shape}  (skipped {fault_skipped})")
         else:
             print("  No fault arrays loaded")
     else:
@@ -160,13 +170,13 @@ def main():
         print("  rerun this script to produce test_fault.npy.")
 
     # ---- Phase 6: save PV-specific norm stats ----
-    stats_path = OUTPUT_DIR / "norm_stats.npy"
+    stats_path = output_dir / "norm_stats.npy"
     np.save(stats_path, stats)
     print(f"\nSaved PV norm stats: {stats_path}")
     print(f"  mean={global_mean:.4f}, std={global_std:.4f}")
 
     # ---- Persist the file-index split for reproducibility (hlab.datasets reads it) ----
-    split_manifest = OUTPUT_DIR / "split_manifest.txt"
+    split_manifest = output_dir / "split_manifest.txt"
     sections = {
         "TRAIN": [p.relative_to(ROOT).as_posix() for _label, p in train_paths],
         "HOLDOUT": [p.relative_to(ROOT).as_posix() for _label, p in holdout_paths],
@@ -176,6 +186,7 @@ def main():
     write_manifest(split_manifest, sections, header=[
         "PV specialist split manifest",
         f"seed={RANDOM_SEED}, holdout_fraction={HOLDOUT_FRACTION}",
+        f"transform: representation={representation}, fit={fit}",
         f"{len(train_paths)} train / {len(holdout_paths)} holdout",
     ])
     print(f"Saved split manifest: {split_manifest}")
