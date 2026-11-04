@@ -2,7 +2,7 @@
 One-shot ingestion of Matias's transformer dataset + motor GT annotations
 into CA_Training_Data.
 
-Source: OneDrive_1_4-14-2026/
+Source: data/sources/matias_onedrive_2026-04-14/
 - Transformer healthy (22 BMPs from p1_Noload): 18 train / 4 test (every 5th to test)
 - Transformer fault (233 BMPs from p2..p9): all to test/fault/transformer
 - Motor GT annotations (40 images + 40 masks): stashed in data/ground_truth/
@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC_BASE = ROOT / "OneDrive_1_4-14-2026"
+SRC_BASE = ROOT / "data" / "sources" / "matias_onedrive_2026-04-14"
 DEST = ROOT / "data" / "CA_Training_Data"
 GT_DEST = ROOT / "data" / "ground_truth" / "induction_motor_40_gt"
 
