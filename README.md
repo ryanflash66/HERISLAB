@@ -48,9 +48,12 @@ Output (1x240x320) reconstructed image
 ```
 HERISLAB/
 ├── src/
+│   ├── hlab/                     # Shared library: paths, transform, datasets, model, bundle, metrics, rules, train
 │   ├── preprocess.py             # Image loading, normalization, train/test split
-│   ├── train_autoencoder.py      # Model definition and training loop
+│   ├── train.py                  # Trains one entry of config/training.json
 │   └── evaluate_autoencoder.py   # Threshold calibration, AUROC, F1 metrics
+├── config/                       # Rule-layer thresholds and training recipes (JSON)
+├── tests/                        # pytest suite
 ├── data/
 │   ├── CA_Training_Data/         # Raw thermal images (hosted on HuggingFace)
 │   └── CA_Preprocessed/          # Z-score normalized .npy arrays
@@ -109,8 +112,8 @@ pip install numpy pillow
 # 1. Preprocess raw images into normalized arrays
 python src/preprocess.py
 
-# 2. Train the autoencoder (normal images only)
-python src/train_autoencoder.py
+# 2. Train the autoencoder (normal images only); recipes live in config/training.json
+python src/train.py --config v2
 
 # 3. Evaluate on test set
 python src/evaluate_autoencoder.py

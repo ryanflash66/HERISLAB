@@ -95,6 +95,30 @@ def raw_files(subdir, folder):
     return [(d / f).relative_to(ROOT).as_posix() for f in sorted(os.listdir(d)) if (d / f).is_file()]
 
 
+def flight_holdout(meta, fraction=0.1, seed=42):
+    """Hold out whole flights (meta "flight") until `fraction` of the frames are held out.
+
+    The early-stopping split of the India training runs (HER-18): the flight
+    list is shuffled once with `seed`, flights are taken in that order until the
+    target is reached. Returns (train_idx, held_idx sorted, chosen flights).
+    """
+    import random
+    by_flight = {}
+    for i, m in enumerate(meta):
+        by_flight.setdefault(m["flight"], []).append(i)
+    flights = sorted(by_flight)
+    random.Random(seed).shuffle(flights)
+    target, held, chosen = fraction * len(meta), [], []
+    for f in flights:
+        if len(held) >= target:
+            break
+        held += by_flight[f]
+        chosen.append(f)
+    held_set = set(held)
+    train_idx = [i for i in range(len(meta)) if i not in held_set]
+    return np.array(train_idx), np.array(sorted(held)), chosen
+
+
 def adjacent_frame(frame_id, step):
     """Frame id of the video neighbour `step` frames away (same zero-padded width), or None."""
     import re
@@ -300,12 +324,13 @@ class Dataset:
 
 
 class InMemoryDataset:
-    """Test adapter with the Dataset interface: splits are given, nothing is read from disk."""
+    """Test adapter with the Dataset interface: splits (and optional masks) are given, nothing is read from disk."""
 
-    def __init__(self, name, splits, stats=None):
+    def __init__(self, name, splits, stats=None, masks=None):
         self.name = name
         self._splits = dict(splits)
         self._stats = stats or {"mean": 0.0, "std": 1.0}
+        self._masks = dict(masks or {})
 
     @property
     def stats(self):
@@ -329,4 +354,6 @@ class InMemoryDataset:
         return Dataset.frames(self, split, source, **where)
 
     def masks(self, split):
-        raise ValueError(f"{self.name} has no panel masks")
+        if split not in self._masks:
+            raise ValueError(f"{self.name} has no panel masks for {split!r}")
+        return self._masks[split]

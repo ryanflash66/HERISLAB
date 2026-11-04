@@ -1,0 +1,43 @@
+{
+  "_doc": "One entry per trained model; src/train.py --config <name> runs hlab.train.fit with it. Keys: dataset (hlab.datasets name), split, holdout (type random_frames|flights, seed, fraction), loss (mse|masked_mse), lr, clip (null = none), seed (null = unseeded torch), epochs, batch, patience, final (best|last), log (file under results/). v2, pv and pv_om reproduce the deleted train_autoencoder*.py scripts exactly; india and india_temp mirror the untracked train_autoencoder_india*.py recipe and are unverified until those scripts are committed.",
+  "v2": {
+    "dataset": "v2", "split": "train",
+    "holdout": {"type": "random_frames", "seed": 42, "fraction": 0.1},
+    "loss": "mse", "lr": 0.001, "clip": null, "seed": null,
+    "epochs": 50, "batch": 32, "patience": 10, "final": "best",
+    "log": "training_log_v2.txt",
+    "note": "Multi-equipment baseline on all five healthy folders (Track A). Recorded run: best val_loss 0.005830 at epoch 50."
+  },
+  "pv": {
+    "dataset": "pv", "split": "train",
+    "holdout": {"type": "random_frames", "seed": 43, "fraction": 0.1},
+    "loss": "mse", "lr": 0.001, "clip": null, "seed": null,
+    "epochs": 50, "batch": 32, "patience": 10, "final": "best",
+    "log": "training_log_pv.txt",
+    "note": "PV specialist on O&M + THM healthy frames (HER-89). Val seed 43 is distinct from the preprocess split seed 42. Recorded run: best val_loss 0.016995 at epoch 5."
+  },
+  "pv_om": {
+    "dataset": "pv_om", "split": "train",
+    "holdout": {"type": "random_frames", "seed": 43, "fraction": 0.1},
+    "loss": "mse", "lr": 0.001, "clip": null, "seed": null,
+    "epochs": 50, "batch": 32, "patience": 10, "final": "best",
+    "log": "training_log_pv_om.txt",
+    "note": "PV specialist on O&M healthy frames only (HER-114 retrain). Recorded run: best val_loss 0.011258 at epoch 10."
+  },
+  "india": {
+    "dataset": "india", "split": "train",
+    "holdout": {"type": "flights", "seed": 42, "fraction": 0.1},
+    "loss": "mse", "lr": 0.0003, "clip": 1.0, "seed": 42,
+    "epochs": 50, "batch": 32, "patience": 10, "final": "last",
+    "log": "india/training_log.txt",
+    "note": "Thermal-Library India plot 17 (milestone 06, HER-106 recipe: lr 3e-4 + clip 1.0, whole-flight holdout). Mirrors the untracked train_autoencoder_india.py; unverified."
+  },
+  "india_temp": {
+    "dataset": "india_temp", "split": "train",
+    "holdout": {"type": "flights", "seed": 42, "fraction": 0.1},
+    "loss": "mse", "lr": 0.0003, "clip": 1.0, "seed": 42,
+    "epochs": 50, "batch": 32, "patience": 10, "final": "last",
+    "log": "india_temp/training_log.txt",
+    "note": "Same recipe on degrees-C input (HER-82). Mirrors the untracked train_autoencoder_india_temp.py; unverified. The panel-masked and inpainting variants need their input blanking step and stay in their scripts."
+  }
+}

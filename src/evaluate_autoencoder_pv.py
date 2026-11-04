@@ -55,7 +55,7 @@ def main():
             bundle = Bundle.load("pv")
         except FileNotFoundError as exc:
             print(f"ERROR: {exc}")
-            print("Run src/preprocess_pv.py and src/train_autoencoder_pv.py first.")
+            print("Run src/preprocess_pv.py and src/train.py --config pv first.")
             return
         print(f"Device: {bundle.device}")
         if bundle.device.type == "cuda":
