@@ -27,13 +27,12 @@ ORIGINAL_DIR = PREPROCESSED / "pv"
 
 def main():
     assert OUTPUT_DIR != ORIGINAL_DIR
-    P.OUTPUT_DIR = OUTPUT_DIR
-    P.PV_TRAIN_FOLDERS = list(PV_FOLDERS["pv_om"])
-    # RANDOM_SEED (42), HOLDOUT_FRACTION (0.10) and the loaders (hlab.transform)
-    # are inherited unchanged from preprocess_pv.
-    print(f"O&M-only variant: folders={P.PV_TRAIN_FOLDERS}, seed={P.RANDOM_SEED}, "
+    folders = list(PV_FOLDERS["pv_om"])
+    # RANDOM_SEED (42), HOLDOUT_FRACTION (0.10) and the transform defaults
+    # ("scale_by_max", "stretch") are inherited unchanged from preprocess_pv.
+    print(f"O&M-only variant: folders={folders}, seed={P.RANDOM_SEED}, "
           f"holdout={P.HOLDOUT_FRACTION:.0%}, out={OUTPUT_DIR}")
-    P.main()
+    P.main(output_dir=OUTPUT_DIR, folders=folders)
 
 
 if __name__ == "__main__":
