@@ -50,7 +50,6 @@ ERROR_FILES = {
     "v2": ("normal_errors.npy", "fault_errors.npy"),
     "pv": ("pv_normal_errors.npy", "pv_fault_errors.npy"),
     "pv_om": ("pv_om_normal_errors.npy", "pv_om_fault_errors.npy"),
-    "pv_matched": ("pv_matched_normal_errors.npy", "pv_matched_fault_errors.npy"),
 }
 
 

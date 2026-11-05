@@ -35,7 +35,6 @@ BUNDLES = {
     "v2": ("autoencoder_best.pth", "", "eval_metrics.npy"),
     "pv": ("autoencoder_pv_best.pth", "pv", "pv_eval_metrics.npy"),
     "pv_om": ("autoencoder_pv_om_best.pth", "pv_om", "pv_om_eval_metrics.npy"),
-    "pv_matched": ("autoencoder_pv_matched_best.pth", "pv_matched", "pv_matched_eval_metrics.npy"),
     "india": ("autoencoder_india_best.pth", "india", "india_eval_metrics.npy"),
     "india_temp": ("autoencoder_india_temp_best.pth", "india_temp", "india_temp_eval_metrics.npy"),
     "india_panel": ("autoencoder_india_panel_best.pth", "india_temp", "india_panel_eval_metrics.npy"),

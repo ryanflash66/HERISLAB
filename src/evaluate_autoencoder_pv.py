@@ -18,16 +18,8 @@ Outputs:
   results/pv_fault_errors.npy   (if test_fault.npy exists)
   results/pv_eval_metrics.npy   (only when we have faults to calibrate against)
   results/eval_log_pv.txt       (console tee)
-
---bundle pv_matched (HER-107) scores the model trained on
-data/CA_Preprocessed/pv_matched/ against that folder's arrays and writes the
-same files with a pv_matched_ prefix (eval_log_pv_matched.txt).
-
-Usage:
-    venv/Scripts/python.exe src/evaluate_autoencoder_pv.py [--bundle pv|pv_matched]
 """
 
-import argparse
 import sys
 
 import numpy as np
@@ -37,7 +29,7 @@ from hlab.bundle import Bundle
 from hlab.datasets import Dataset
 from hlab.paths import RESULTS
 
-BUNDLE_NAMES = ("pv", "pv_matched")   # bundle name = dataset name = output prefix
+LOG_PATH = RESULTS / "eval_log_pv.txt"
 
 
 class Tee:
@@ -51,22 +43,19 @@ class Tee:
             s.flush()
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Evaluate a PV-specialist bundle.")
-    parser.add_argument("--bundle", choices=BUNDLE_NAMES, default="pv")
-    name = parser.parse_args(argv).bundle
+def main():
     RESULTS.mkdir(parents=True, exist_ok=True)
-    log_handle = (RESULTS / f"eval_log_{name}.txt").open("w", encoding="utf-8")
+    log_handle = LOG_PATH.open("w", encoding="utf-8")
     original_stdout = sys.stdout
     sys.stdout = Tee(sys.stdout, log_handle)
 
     try:
         # --- Load PV specialist bundle ---
         try:
-            bundle = Bundle.load(name)
+            bundle = Bundle.load("pv")
         except FileNotFoundError as exc:
             print(f"ERROR: {exc}")
-            print(f"Run the {name} preprocess script and src/train.py --config {name} first.")
+            print("Run src/preprocess_pv.py and src/train.py --config pv first.")
             return
         print(f"Device: {bundle.device}")
         if bundle.device.type == "cuda":
@@ -77,7 +66,7 @@ def main(argv=None):
         print(f"  Loaded {bundle.weights.name}")
 
         # --- Test normals ---
-        dataset = Dataset(name)
+        dataset = Dataset("pv")
         if not dataset.has_split("holdout"):
             print(f"ERROR: {dataset} has no holdout array. Run src/preprocess_pv.py first.")
             return
@@ -90,8 +79,8 @@ def main(argv=None):
         print(f"  mean: {normal_errors.mean():.6f}  std: {normal_errors.std():.6f}")
         print(f"  min:  {normal_errors.min():.6f}  max: {normal_errors.max():.6f}")
 
-        np.save(RESULTS / f"{name}_normal_errors.npy", normal_errors)
-        print(f"  Saved: {RESULTS / f'{name}_normal_errors.npy'}")
+        np.save(RESULTS / "pv_normal_errors.npy", normal_errors)
+        print(f"  Saved: {RESULTS / 'pv_normal_errors.npy'}")
 
         # --- Test faults (if available) ---
         if not dataset.has_split("fault"):
@@ -122,14 +111,14 @@ def main(argv=None):
         print("    AUROC: 0.9023   F1: 0.9807   Precision: 0.9621   Recall: 1.0000")
 
         # Save
-        np.save(RESULTS / f"{name}_fault_errors.npy", fault_errors)
-        np.save(RESULTS / f"{name}_eval_metrics.npy", {
+        np.save(RESULTS / "pv_fault_errors.npy", fault_errors)
+        np.save(RESULTS / "pv_eval_metrics.npy", {
             "auroc": auroc,
             "threshold": threshold,
             **metrics,
         })
-        print(f"\nSaved: {RESULTS / f'{name}_fault_errors.npy'}")
-        print(f"Saved: {RESULTS / f'{name}_eval_metrics.npy'}")
+        print(f"\nSaved: {RESULTS / 'pv_fault_errors.npy'}")
+        print(f"Saved: {RESULTS / 'pv_eval_metrics.npy'}")
 
         print("\n--- PV specialist evaluation complete. ---")
     finally:
