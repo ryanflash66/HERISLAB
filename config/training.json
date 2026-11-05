@@ -24,14 +24,6 @@
     "log": "training_log_pv_om.txt",
     "note": "PV specialist on O&M healthy frames only (HER-114 retrain). Recorded run: best val_loss 0.011258 at epoch 10."
   },
-  "pv_matched": {
-    "dataset": "pv_matched", "split": "train",
-    "holdout": {"type": "random_frames", "seed": 43, "fraction": 0.1},
-    "loss": "mse", "lr": 0.001, "clip": null, "seed": null,
-    "epochs": 50, "batch": 32, "patience": 10, "final": "best",
-    "log": "training_log_pv_matched.txt",
-    "note": "The pv recipe on pv_matched/ (HER-107): same frames and split, both classes cropped to 4:3 and histogram-equalised."
-  },
   "india": {
     "dataset": "india", "split": "train",
     "holdout": {"type": "flights", "seed": 42, "fraction": 0.1},
