@@ -127,6 +127,51 @@ def test_check_trivial_baselines_orders_the_statistics():
     assert 0 <= b["logreg"] <= 1
 
 
+def _raw_pv_files(tmp_path, n_healthy=6, n_fault=5):
+    """16-bit 640x512 bright healthy frames and dark 8-bit RGB 512x512 faults, as CA-PV and PVMD differ."""
+    rng = np.random.default_rng(3)
+    healthy, faults = [], []
+    for i in range(n_healthy):
+        p = tmp_path / f"h{i}.png"
+        Image.fromarray(rng.integers(20000, 24000, (512, 640)).astype(np.uint16)).save(p)
+        healthy.append(p)
+    for i in range(n_fault):
+        p = tmp_path / f"f{i}.png"
+        Image.fromarray(rng.integers(0, 120, (512, 512, 3)).astype(np.uint8)).save(p)
+        faults.append(p)
+    return healthy, faults
+
+
+def test_check_transform_baselines_per_variant(tmp_path):
+    healthy, faults = _raw_pv_files(tmp_path)
+    rows = audit.check_transform_baselines(healthy, faults, seed=0)
+    assert [r["variant"] for r in rows] == [v[0] for v in audit.TRANSFORM_VARIANTS]
+    assert all(set(audit.TRANSFORM_COLS) <= set(r) for r in rows)
+    by = {r["variant"]: r for r in rows}
+    assert by["as_is"]["auroc_p1"] == 1.0                          # the stretch alone separates the formats
+    assert by["as_is"]["p1_median_healthy"] > by["as_is"]["p1_median_fault"]
+    m = by["matched"]
+    assert m["p1_median_healthy"] == m["p1_median_fault"] and m["auroc_p1"] < by["as_is"]["auroc_p1"]
+    assert m["top3"].count(",") == 2 and 0 <= m["logreg"] <= 1
+    table = audit.single_statistic_table(rows).splitlines()
+    assert table[0] == "| statistic | " + " | ".join(by) + " |" and len(table) == 2 + len(audit.FEAT)
+    assert table[2 + audit.FEAT.index("p1")].startswith("| p1 | 1.000 |")
+
+
+def test_pv_frame_paths_and_stored_baselines(tmp_path):
+    ds = _pv_dataset()
+    gid = np.array([0, 0, 1, 2, 2, 3])
+    healthy, faults = audit.pv_frame_paths(ds, gid, root=tmp_path)
+    assert healthy == [tmp_path / f for f in ds.split("holdout").frame_ids]
+    assert faults == [tmp_path / f"pvmd/F{i}.jpg" for i in (0, 2, 3, 5)]
+    with pytest.raises(RuntimeError, match="fault files"):
+        audit.pv_frame_paths(ds, gid[:3])
+    b = audit.check_stored_baselines(ds, gid, seed=0)
+    assert b["single"]["mean"] == 1.0                              # faults are shifted by +1.5
+    no_fault = InMemoryDataset("pv", {"holdout": ds.split("holdout")})
+    assert audit.check_stored_baselines(no_fault, gid) is None
+
+
 # ---------------------------------------------------------------- 6. rule layer
 def test_check_rule_layer_counts_tiers_and_decisions():
     config = RuleConfig.load(DEFAULT_CONFIG_PATH)

@@ -15,6 +15,8 @@ Checks
   check_source_shortcut(neg, src, fu, thr)      errors by acquisition source, source AUROCs, false positives by source
   check_headline(neg, pos, thr, seed)           AUROC with bootstrap CI, confusion at the saved and re-tuned thresholds, trivial F1
   check_trivial_baselines(negF, posF, seed)     single global statistics and the 16-statistic logistic regression (no model)
+  check_transform_baselines(healthy, faults)    the trivial baselines per hlab.transform variant, from the raw files (HER-107)
+  check_stored_baselines(dataset, gid)          the trivial baselines on a PV dataset's stored arrays (pv/, pv_matched/)
   check_rule_layer(config, images, equipment, ml_flags)   severity tiers and ensemble decisions, hlab.rules per image
 
 Scenarios
@@ -22,6 +24,8 @@ Scenarios
   run_scenario(name, keep, inputs, thr, seed)   every check above a keep-mask over the held-out healthy frames
   print_scenario(S)                             the report block the HER-114 reruns print
   write_summary(rows, cols, md, csv)            the side-by-side table
+  pv_frame_paths(dataset, gid)                  raw files of a PV dataset's held-out frames and unique faults
+  single_statistic_table(rows)                  every statistic's AUROC per transform variant, as Markdown
 
 Feature extraction (global_features, FEAT) and the no-model baselines stay
 here: they belong to the audit, not to a detector. Seeds are arguments
@@ -39,9 +43,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # until hlab is installable
 from hlab.datasets import PV_FAULT_FOLDER, adjacent_frame, pvmd_unique_groups  # noqa: E402
 from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion, from_groups, trivial_f1  # noqa: E402
-from hlab.paths import RAW, RESULTS  # noqa: E402
+from hlab.paths import RAW, RESULTS, ROOT  # noqa: E402
 from hlab.rules import combine, evaluate  # noqa: E402
-from hlab.transform import denormalize  # noqa: E402
+from hlab.transform import denormalize, load_gray, to_model_input  # noqa: E402
 
 SEED = 0                        # bootstrap / cross-validation seed the paper numbers used
 
@@ -208,6 +212,55 @@ def check_trivial_baselines(neg_features, pos_features, seed=SEED):
     return dict(single=single, top=top, logreg=float(logreg_cv_auroc(neg_features, pos_features, seed=seed)))
 
 
+# HER-107: the same frames under each (representation, fit) of hlab.transform, applied to both classes.
+TRANSFORM_VARIANTS = [
+    ("as_is", "scale_by_max", "stretch"),      # what pv/ holds
+    ("crop", "scale_by_max", "crop"),          # aspect-ratio fix only
+    ("minmax_crop", "minmax", "crop"),         # one stretch rule for both classes, plus crop
+    ("equalize", "equalize", "stretch"),       # intensity fix only
+    ("matched", "equalize", "crop"),           # what pv_matched/ holds (preprocess_pv_matched.py)
+]
+TRANSFORM_COLS = ["variant", "representation", "fit", "p1_median_healthy", "p1_median_fault", "auroc_p1",
+                  "top3", "logreg"]
+_IDENTITY = {"mean": 0.0, "std": 1.0}     # global_features denormalises; to_model_input is already 0-255
+
+
+def transform_features(paths, representation, fit):
+    """global_features of the raw files at `paths` after to_model_input(representation, fit)."""
+    return global_features([to_model_input(load_gray(p), representation, fit) for p in paths], _IDENTITY)
+
+
+def check_transform_baselines(healthy_paths, fault_paths, variants=TRANSFORM_VARIANTS, seed=SEED):
+    """check_trivial_baselines for every (name, representation, fit) in `variants`, reloading the raw files.
+
+    One row per variant: the p1 medians (0-255), the p1 AUROC, the three best single statistics and the
+    16-statistic logistic regression, rounded as results/her-107/baselines.md shows them; the full
+    check_trivial_baselines result is kept under "_baselines".
+    """
+    j = FEAT.index("p1")
+    rows = []
+    for name, representation, fit in variants:
+        negF = transform_features(healthy_paths, representation, fit)
+        posF = transform_features(fault_paths, representation, fit)
+        b = check_trivial_baselines(negF, posF, seed=seed)
+        rows.append(dict(variant=name, representation=representation, fit=fit,
+                         p1_median_healthy=round(float(np.median(negF[:, j])), 1),
+                         p1_median_fault=round(float(np.median(posF[:, j])), 1),
+                         auroc_p1=round(b["single"]["p1"], 3),
+                         top3=", ".join(f"{k} {v:.3f}" for k, v in b["top"]),
+                         logreg=round(b["logreg"], 3), _baselines=b))
+    return rows
+
+
+def check_stored_baselines(dataset, gid, seed=SEED):
+    """check_trivial_baselines on a PV dataset's stored arrays (holdout vs unique faults), None if not built."""
+    if not (dataset.has_split("holdout") and dataset.has_split("fault")):
+        return None
+    negF = global_features(dataset.split("holdout").x, dataset.stats)
+    posF = global_features(dataset.split("fault").x, dataset.stats)[unique_first(np.asarray(gid))]
+    return check_trivial_baselines(negF, posF, seed=seed)
+
+
 # ---------------------------------------------------------------- 6. rule layer
 def check_rule_layer(config, images_0_255, equipment, ml_flags):
     """(severity counts, ensemble decision counts, images at ALARM or CRITICAL) via hlab.rules per image."""
@@ -316,6 +369,25 @@ def print_scenario(S):
     print(f"single-statistic AUROC (unique faults): p1 = {base['single']['p1']:.3f}; "
           f"best {[(k, round(v, 3)) for k, v in base['top']]}")
     print(f"5-fold logistic regression on 16 statistics: AUROC {base['logreg']:.3f}")
+
+
+def pv_frame_paths(dataset, gid, root=None):
+    """(held-out healthy files, first file of every unique fault) of a PV dataset, in its manifest order."""
+    root = ROOT if root is None else root
+    rows = dataset.manifest()
+    healthy = [root / f for f, split, _src in rows if split == "holdout"]
+    faults = [root / f for f, split, _src in rows if split == "fault"]
+    if len(gid) != len(faults):
+        raise RuntimeError(f"{len(faults)} fault files in the {dataset.name} manifest, {len(gid)} PVMD files")
+    return healthy, [faults[i] for i in unique_first(np.asarray(gid))]
+
+
+def single_statistic_table(rows):
+    """Markdown: one line per global statistic, its AUROC under every check_transform_baselines row."""
+    out = ["| statistic | " + " | ".join(r["variant"] for r in rows) + " |", "|---|" + "---|" * len(rows)]
+    for k in FEAT:
+        out.append(f"| {k} | " + " | ".join(f"{r['_baselines']['single'][k]:.3f}" for r in rows) + " |")
+    return "\n".join(out)
 
 
 def write_summary(rows, cols, md_path, csv_path):
