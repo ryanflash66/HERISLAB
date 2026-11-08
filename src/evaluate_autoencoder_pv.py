@@ -4,9 +4,16 @@ Evaluate the PV-specialist autoencoder (HER-90).
 Loads the "pv" bundle and scores it against the PV-only test split produced
 by src/preprocess_pv.py. That split is random per frame, so frames from the
 same video can sit in both train and test (not independent). Reuses
-score_errors from evaluate_autoencoder.py (metrics from hlab.metrics), so the
+calibrate from evaluate_autoencoder.py (metrics from hlab.metrics), so the
 metric code is the same as the v2 baseline; the test sets and the
 preprocessing differ, so the numbers are not a like-for-like comparison.
+
+Threshold (HER-97): the held-out frames and the PVMD faults are cut into a
+validation half and a test half (docs/data_manifests/pv_calibration_split.csv,
+src/build_calibration_split.py). The best-F1 threshold is chosen on the
+validation half with each pixel-unique fault counted once, frozen, and applied
+once to the test half. The headline is that test half, one score per unique
+fault; the per-file numbers are printed alongside.
 
 Inputs (through hlab.bundle / hlab.datasets):
   models/autoencoder_pv_best.pth
@@ -24,9 +31,9 @@ import sys
 
 import numpy as np
 
-from evaluate_autoencoder import print_metrics, score_errors
+from evaluate_autoencoder import calibrate, print_calibration, saved_metrics
 from hlab.bundle import Bundle
-from hlab.datasets import Dataset
+from hlab.datasets import Dataset, pvmd_unique_groups
 from hlab.paths import RESULTS
 
 LOG_PATH = RESULTS / "eval_log_pv.txt"
@@ -103,20 +110,15 @@ def main():
         separation = fault_errors.mean() - normal_errors.mean()
         print(f"\n  Mean separation (fault - normal): {separation:.6f}")
 
-        auroc, threshold, metrics = score_errors(normal_errors, fault_errors)
-        print_metrics(auroc, threshold, metrics)
-
-        # v2 comparison
-        print("\n  v2 baseline (for comparison):")
-        print("    AUROC: 0.9023   F1: 0.9807   Precision: 0.9621   Recall: 1.0000")
+        # Threshold on the validation half (unique faults), frozen; test half scored once (HER-97)
+        _names, gid, _groups = pvmd_unique_groups()
+        cal = calibrate(normal_errors, fault_errors, dataset.calibration("holdout"),
+                        dataset.calibration("fault"), fault_groups=gid)
+        print_calibration(cal)
 
         # Save
         np.save(RESULTS / "pv_fault_errors.npy", fault_errors)
-        np.save(RESULTS / "pv_eval_metrics.npy", {
-            "auroc": auroc,
-            "threshold": threshold,
-            **metrics,
-        })
+        np.save(RESULTS / "pv_eval_metrics.npy", saved_metrics(cal))
         print(f"\nSaved: {RESULTS / 'pv_fault_errors.npy'}")
         print(f"Saved: {RESULTS / 'pv_eval_metrics.npy'}")
 

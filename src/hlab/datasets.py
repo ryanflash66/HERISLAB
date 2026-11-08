@@ -6,6 +6,7 @@ Datasets (HER-127): directory layout, stored representation and manifests behind
     thm = ds.frames("holdout", source="thm")   # boolean selector, no "THM_" in-name tests elsewhere
     ds.manifest()                        # [(frame_id, split, source), ...]
     ds.stats                             # {"mean", "std"} the arrays were z-scored with
+    ds.calibration("holdout")            # "val" | "test" per frame: where the alarm threshold is chosen (HER-97)
 
 Datasets and what the preprocess scripts write for them (all under data/CA_Preprocessed/):
 
@@ -158,6 +159,79 @@ def pvmd_unique_groups(exif_transpose=False, fault_dir=None):
     return files, gid, groups
 
 
+_HASHES = {}
+
+
+def pixel_hash(path):
+    """md5 of a file's decoded pixel array (shape, dtype and bytes), as the loader receives it (EXIF tag ignored)."""
+    key = str(path)
+    if key not in _HASHES:
+        a = np.array(Image.open(path))
+        _HASHES[key] = hashlib.md5(f"{a.shape}{a.dtype}".encode() + a.tobytes()).hexdigest()
+    return _HASHES[key]
+
+
+# ---------------------------------------------------------------- calibration split (HER-97)
+# Every test pool is cut once into a validation half, where the alarm threshold is chosen, and a
+# test half, which is scored once at that frozen threshold. The assignment is written to a tracked
+# manifest by src/build_calibration_split.py from file names and pixels only, never from scores.
+CALIBRATION_FILE = {"v2": "v2_calibration_split.csv", "pv": "pv_calibration_split.csv",
+                    "pv_matched": "pv_calibration_split.csv", "pv_om": "pv_calibration_split.csv"}
+CALIBRATION_FIELDS = ("frame_id", "label", "stratum", "group", "role")
+CALIBRATION_BLOCKS = 10
+CALIBRATION_SEED = 0
+VAL, TEST = "val", "test"
+
+
+def blocked_roles(order, n_blocks=CALIBRATION_BLOCKS):
+    """VAL | TEST per item: the items sorted by `order` (frame number) and cut into `n_blocks`
+    contiguous blocks; even blocks go to VAL, odd blocks to TEST, so neighbouring video frames
+    mostly share a half and both halves span the whole video."""
+    order = np.asarray(order)
+    roles = np.empty(len(order), dtype=object)
+    for b, idx in enumerate(np.array_split(np.argsort(order, kind="stable"), n_blocks)):
+        roles[idx] = VAL if b % 2 == 0 else TEST
+    return roles
+
+
+def group_roles(groups, strata, seed=CALIBRATION_SEED, fraction=0.5):
+    """VAL | TEST per item, with every item of a group in the same half.
+
+    A group's stratum is the stratum of its first item. Within each stratum (sorted) the groups
+    are permuted by np.random.default_rng(seed) and the first round(fraction * n) go to VAL.
+    """
+    groups, strata = list(groups), list(strata)
+    first = {}
+    for g, s in zip(groups, strata):
+        first.setdefault(g, s)
+    by_stratum = {}
+    for g, s in first.items():
+        by_stratum.setdefault(s, []).append(g)
+    rng = np.random.default_rng(seed)
+    role_of = {}
+    for s in sorted(by_stratum):
+        gs = by_stratum[s]
+        perm = rng.permutation(len(gs))
+        n_val = int(round(fraction * len(gs)))
+        for rank, i in enumerate(perm):
+            role_of[gs[i]] = VAL if rank < n_val else TEST
+    return np.array([role_of[g] for g in groups], dtype=object)
+
+
+def write_calibration(path, rows):
+    """rows: dicts with CALIBRATION_FIELDS, in array order."""
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=CALIBRATION_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def read_calibration(path):
+    """{frame_id: row} of a calibration manifest."""
+    with open(path, encoding="utf-8") as fh:
+        return {r["frame_id"]: r for r in csv.DictReader(fh)}
+
+
 # ---------------------------------------------------------------- splits
 @dataclass
 class Split:
@@ -306,6 +380,27 @@ class Dataset:
             raise RuntimeError(f"{self}: {split} has {len(x)} frames but the manifest lists {len(ids)}")
         return Split(split, x, labels, ids, source, meta)
 
+    def calibration(self, split, manifests=None):
+        """VAL | TEST per frame of `split` (array order), from the tracked calibration manifest (HER-97).
+
+        A frame the manifest does not list is an error: the halves are fixed before any testing,
+        so a test pool that changed needs src/build_calibration_split.py run again, on purpose.
+        """
+        if self.name not in CALIBRATION_FILE:
+            raise ValueError(f"{self.name} has no calibration split; India uses plot 16 as VAL")
+        from hlab.paths import MANIFESTS
+        rows = read_calibration((manifests or MANIFESTS) / CALIBRATION_FILE[self.name])
+        if isinstance(split, str):
+            parts = self._test_parts() if split == "test" else (split,)
+            ids = [f for part in parts for f, s, _src in self.manifest() if s == part]
+        else:
+            ids = split.frame_ids
+        missing = [f for f in ids if f not in rows]
+        if missing:
+            raise RuntimeError(f"{len(missing)} frames of {self.name} {split} are not in "
+                               f"{CALIBRATION_FILE[self.name]} (first: {missing[0]})")
+        return np.array([rows[f]["role"] for f in ids], dtype=object)
+
     def frames(self, split, source=None, **where):
         """Boolean selector over `split`: by source and/or meta key=value (e.g. sequence="dr", plot="18")."""
         s = self.split(split) if isinstance(split, str) else split
@@ -366,6 +461,11 @@ class InMemoryDataset:
 
     def frames(self, split, source=None, **where):
         return Dataset.frames(self, split, source, **where)
+
+    def calibration(self, split, manifests=None):
+        """VAL | TEST per frame: meta "role" of each frame (tests set it there)."""
+        s = self.split(split) if isinstance(split, str) else split
+        return np.array([m["role"] for m in s.meta], dtype=object)
 
     def masks(self, split):
         if split not in self._masks:
