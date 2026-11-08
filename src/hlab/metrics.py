@@ -72,6 +72,29 @@ def auroc_ci(scores, labels, n_boot=2000, seed=0):
     return float(lo), float(hi)
 
 
+def bootstrap_cis(scores, labels, stats, n_boot=2000, seed=0):
+    """95% stratified bootstrap intervals of several statistics on the same resamples.
+
+    ``stats`` maps a name to ``f(scores, labels) -> float``. Returns
+    {name: (point, lo, hi)}. The resampling is the one ``auroc_ci`` uses (same
+    generator, same draws), so ``stats={"auroc": auroc}`` reproduces ``auroc_ci``
+    with the same seed. The resampling unit is one entry of ``scores``: pass one
+    score per distinct image to make the interval reflect the distinct images.
+    """
+    s, y = _check(scores, labels)
+    rng = np.random.default_rng(seed)
+    vals = {k: np.empty(n_boot) for k in stats}
+    for b in range(n_boot):
+        idx = _stratified_indices(y, rng)
+        for k, f in stats.items():
+            vals[k][b] = f(s[idx], y[idx])
+    out = {}
+    for k, f in stats.items():
+        lo, hi = np.percentile(vals[k], [2.5, 97.5])
+        out[k] = (float(f(s, y)), float(lo), float(hi))
+    return out
+
+
 def paired_delta_ci(scores_a, scores_b, labels, n_boot=2000, seed=0):
     """AUROC(b) - AUROC(a) with a paired bootstrap interval: (delta, lo, hi).
 

@@ -120,6 +120,14 @@ def test_auroc_ci_is_deterministic_per_seed():
     assert a[0] <= M.auroc(s, y) <= a[1]
 
 
+def test_bootstrap_cis_reproduces_auroc_ci():
+    s, y = _toy()
+    out = M.bootstrap_cis(s, y, {"auroc": M.auroc, "ap": M.average_precision}, n_boot=200, seed=0)
+    assert out["auroc"][0] == M.auroc(s, y)
+    assert out["auroc"][1:] == M.auroc_ci(s, y, n_boot=200, seed=0)
+    assert out["ap"][1] <= out["ap"][0] <= out["ap"][2]
+
+
 def test_paired_delta_of_self_is_zero():
     s, y = _toy()
     assert M.paired_delta_ci(s, s, y, n_boot=100) == (0.0, 0.0, 0.0)
