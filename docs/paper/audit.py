@@ -25,6 +25,11 @@ Checks
   check_stored_baselines(dataset, gid)          the trivial baselines on a PV dataset's stored arrays (pv/, pv_matched/)
   rule_signals(config, images, equipment)       the rule layer's temperature signal per image (dT proxy for PV)
   check_rule_layer(config, images, equipment, ml_flags)   severity tiers and ensemble decisions, hlab.rules per image
+  check_india_baselines(F, y, flight, split)    the 16-statistic logistic regression on the India frames, folds of whole
+                                                flights, plot 17 -> plots 16/18, India -> other sites (HER-131)
+  check_box_spread(fault, control)              temperature spread inside the India fault boxes vs the same boxes in
+                                                healthy frames of the same flight (HER-131)
+  check_fault_duplicates(boxed, order, split)   distinct faults when boxed frames in consecutive shots count once (HER-131)
 
 Scenarios
   PVInputs(dataset, bundle)                     one PV dataset's holdout, faults, saved errors, unique-fault means, features
@@ -57,7 +62,7 @@ from hlab.metrics import (auroc, auroc_ci, average_precision, best_f1_threshold,
                           roc_points, tpr_at_fpr, trivial_f1)
 from hlab.paths import RAW, RESULTS, ROOT  # noqa: E402
 from hlab.rules import combine, evaluate  # noqa: E402
-from hlab.transform import denormalize, load_gray, to_model_input  # noqa: E402
+from hlab.transform import CELSIUS_RANGE, denormalize, load_gray, to_model_input  # noqa: E402
 
 SEED = 0                        # bootstrap / cross-validation seed the paper numbers used
 
@@ -316,15 +321,59 @@ def logreg_cv_scores(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1, seed=SEED):
     out = np.zeros(len(y))
     for f in folds:
         tr = np.setdiff1d(np.arange(len(y)), f)
-        mu, sd = X[tr].mean(0), X[tr].std(0) + 1e-9
-        A = np.c_[np.ones(len(tr)), (X[tr] - mu) / sd]
-        w = np.zeros(A.shape[1])
-        for _ in range(iters):
-            p = 1 / (1 + np.exp(-A @ w))
-            g = A.T @ (p - y[tr]) / len(tr) + l2 * np.r_[0, w[1:]] / len(tr)
-            w -= lr * g
-        out[f] = 1 / (1 + np.exp(-(np.c_[np.ones(len(f)), (X[f] - mu) / sd] @ w)))
+        out[f] = logreg_predict(logreg_fit(X[tr], y[tr], l2=l2, iters=iters, lr=lr), X[f])
     return out, y
+
+
+def logreg_fit(X, y, l2=1.0, iters=3000, lr=0.1):
+    """(mu, sd, w) of the standardized L2 logistic regression every baseline here uses (gradient descent)."""
+    mu, sd = X.mean(0), X.std(0) + 1e-9
+    A = np.c_[np.ones(len(X)), (X - mu) / sd]
+    w = np.zeros(A.shape[1])
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-A @ w))
+        g = A.T @ (p - y) / len(X) + l2 * np.r_[0, w[1:]] / len(X)
+        w -= lr * g
+    return mu, sd, w
+
+
+def logreg_predict(fit, X):
+    """Probabilities of a logreg_fit result on rows X."""
+    mu, sd, w = fit
+    return 1 / (1 + np.exp(-(np.c_[np.ones(len(X)), (X - mu) / sd] @ w)))
+
+
+def logreg_group_cv_scores(X, y, groups, k=5, seed=SEED, **kw):
+    """Out-of-fold probabilities with whole groups (flights) per fold: no group is in both a fit and its scoring.
+
+    The distinct groups are permuted with np.random.default_rng(seed) and cut into k folds (np.array_split).
+    """
+    groups = np.asarray(groups)
+    g = np.random.default_rng(seed).permutation(np.unique(groups))
+    out = np.zeros(len(y))
+    for fold in np.array_split(g, k):
+        te = np.isin(groups, fold)
+        out[te] = logreg_predict(logreg_fit(X[~te], y[~te], **kw), X[te])
+    return out
+
+
+def auroc_cluster_ci(scores, labels, groups, n_boot=2000, seed=SEED):
+    """95% bootstrap interval of the AUROC resampling whole groups (flights) with replacement.
+
+    Frames of one flight are not independent, so this is wider than hlab.metrics.auroc_ci.
+    Draws without both classes are skipped; returns (lo, hi, draws used).
+    """
+    s, y, groups = np.asarray(scores, float), np.asarray(labels, int), np.asarray(groups)
+    ug = np.unique(groups)
+    rows = [np.flatnonzero(groups == u) for u in ug]
+    rng = np.random.default_rng(seed)
+    vals = []
+    for _ in range(n_boot):
+        idx = np.concatenate([rows[i] for i in rng.integers(0, len(ug), len(ug))])
+        if 0 < y[idx].sum() < len(idx):
+            vals.append(auroc(s[idx], y[idx]))
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return float(lo), float(hi), len(vals)
 
 
 def check_trivial_baselines(neg_features, pos_features, seed=SEED):
@@ -453,6 +502,171 @@ def check_rule_layer(config, images_0_255, equipment, ml_flags):
         sev.append(v.severity)
         final.append({"flag": "FLAG", "monitor": "MONITOR", "pass": "NORMAL"}[combine(bool(ml), v).action])
     return dict(Counter(sev)), dict(Counter(final)), sum(s in ("ALARM", "CRITICAL") for s in sev)
+
+
+# ---------------------------------------------------------------- 7. India radiometric audit (HER-131)
+INDIA_READINGS = ("minmax", "celsius")     # the india/ model input and the india_temp/ fixed scale
+FIT_SPLITS = ("train", "train_faulty_unused")   # plot 17, the plot the India models were fit on
+SPREAD_UNDER_C = 2.0                       # the ticket's "fraction under 2 degrees C"
+
+
+def celsius_0_255(t):
+    """Degrees C on the fixed CELSIUS_RANGE scale (india_temp/), mapped linearly to 0-255 so global_features applies.
+
+    frac_ge250 then counts pixels at or above 117.6 C and frac_le5 those at or below 2.4 C.
+    """
+    lo, hi = CELSIUS_RANGE
+    return (to_model_input(t, "celsius") - lo) * (255.0 / (hi - lo))
+
+
+def india_frame_features(raw, celsius):
+    """{reading: global_features row} of one R-JPG: minmax of the raw counts, and degrees C on the fixed scale."""
+    x = {"minmax": to_model_input(raw, "minmax"), "celsius": celsius_0_255(celsius)}
+    return {k: global_features([x[k]], _IDENTITY)[0] for k in INDIA_READINGS}
+
+
+def box_pixels(box, shape):
+    """(r0, r1, c0, c1) slice bounds of a labelme box (x0, y0, x1, y1 source pixels, inclusive), rounded and clipped."""
+    x0, y0, x1, y1 = (int(round(v)) for v in box)
+    r0, c0 = min(max(y0, 0), shape[0] - 1), min(max(x0, 0), shape[1] - 1)
+    return r0, max(r0 + 1, min(y1 + 1, shape[0])), c0, max(c0 + 1, min(x1 + 1, shape[1]))
+
+
+def box_spread(celsius, box):
+    """(max - median, max - min, pixels) of the temperatures inside one box."""
+    r0, r1, c0, c1 = box_pixels(box, celsius.shape)
+    v = celsius[r0:r1, c0:c1]
+    return float(v.max() - np.median(v)), float(v.max() - v.min()), int(v.size)
+
+
+def control_boxes(fault_boxes, healthy_rows, seed=SEED):
+    """One same-size, same-position box per fault box, in a healthy frame of the same flight.
+
+    fault_boxes: [(rel_path, flight, plot, box)]; healthy_rows: manifest rows (rel_path, flight, plot).
+    The healthy frame is drawn uniformly with np.random.default_rng(seed) from the box's flight, or
+    from its plot when the flight has no healthy frame. Returns {healthy rel_path: [(index into
+    fault_boxes, box)]} and the number of boxes that fell back to the plot.
+    """
+    rng = np.random.default_rng(seed)
+    by_flight, by_plot = {}, {}
+    for r in healthy_rows:
+        by_flight.setdefault(r["flight"], []).append(r["rel_path"])
+        by_plot.setdefault(r["plot"], []).append(r["rel_path"])
+    out, fallback = {}, 0
+    for i, (_p, flight, plot, box) in enumerate(fault_boxes):
+        pool = by_flight.get(flight)
+        if not pool:
+            pool, fallback = by_plot[plot], fallback + 1
+        out.setdefault(pool[int(rng.integers(len(pool)))], []).append((i, box))
+    return out, fallback
+
+
+def spread_summary(v, under=SPREAD_UNDER_C):
+    """n, mean, 5/25/50/75/95th percentiles and the fraction under `under` degrees C."""
+    v = np.asarray(v, float)
+    p = np.percentile(v, [5, 25, 50, 75, 95])
+    return dict(n=len(v), mean=float(v.mean()), p5=float(p[0]), p25=float(p[1]), p50=float(p[2]),
+                p75=float(p[3]), p95=float(p[4]), frac_under=float((v < under).mean()))
+
+
+def check_box_spread(fault, control, under=SPREAD_UNDER_C):
+    """Temperature spread inside the fault boxes vs the same boxes placed in healthy frames.
+
+    fault / control: {"max_minus_median": [...], "max_minus_min": [...]} in degrees C, one value per box.
+    Per measure: both summaries and the AUROC of fault over control boxes (0.5 = no difference).
+    """
+    return {m: dict(fault=spread_summary(fault[m], under), control=spread_summary(control[m], under),
+                    auroc=auroc(*from_groups(control[m], fault[m])))
+            for m in ("max_minus_median", "max_minus_min")}
+
+
+_SHOT = re.compile(r"DJI_(\d+)_R(?: \((\d+)\))?\.JPG$", re.I)
+
+
+def shot_key(name, taken=""):
+    """Sort key of a frame in its flight: (EXIF DateTime, copy suffix, shot number).
+
+    232 frames are named like "DJI_0325_R (2).JPG" and are different shots from their namesakes
+    (a second counter in the same folder), so the capture time orders the shots first.
+    """
+    m = _SHOT.search(name)
+    if not m:
+        raise ValueError(f"not a DJI R-JPG name: {name}")
+    return taken, int(m.group(2) or 0), int(m.group(1))
+
+
+def consecutive_groups(positions, gap=1):
+    """Groups of positions (sorted) where each member is at most `gap` shots after the previous one."""
+    pos = sorted(positions)
+    groups = []
+    for p in pos:
+        if groups and p - groups[-1][-1] <= gap:
+            groups[-1].append(p)
+        else:
+            groups.append([p])
+    return groups
+
+
+def check_fault_duplicates(boxed, order, split_of, gaps=(1, 2, 5)):
+    """Distinct faults when boxed frames in consecutive shots of one flight are counted once.
+
+    boxed: {folder: [boxed frame names]}; order: {folder: [every frame name on disk, in shot order]};
+    split_of: {(folder, name): split}. gap g joins boxed frames at most g shots apart (g = 1: the
+    very next shot; g = 5: the +-5 shots the reviewed-healthy selection treats as the same modules).
+    A group's split is the split of its frames (a flight is in one split only).
+    Per gap: distinct groups, group-size counts, largest group, and boxed frames / groups by split.
+    """
+    out = {}
+    for g in gaps:
+        sizes, by_split = Counter(), {}
+        for folder, names in boxed.items():
+            idx = {n: i for i, n in enumerate(order[folder])}
+            for grp in consecutive_groups([idx[n] for n in names], g):
+                sizes[len(grp)] += 1
+                s = split_of[(folder, order[folder][grp[0]])]
+                f, d = by_split.get(s, (0, 0))
+                by_split[s] = (f + len(grp), d + 1)
+        out[g] = dict(boxed=sum(k * v for k, v in sizes.items()), distinct=sum(sizes.values()),
+                      sizes=dict(sorted(sizes.items())), largest=max(sizes), by_split=dict(sorted(by_split.items())))
+    return out
+
+
+def _score_row(s, y, flights=None, seed=SEED):
+    lo, hi = auroc_ci(s, y, seed=seed)
+    row = dict(n_healthy=int((y == 0).sum()), n_faulty=int(y.sum()), auroc=auroc(s, y), ci=(lo, hi))
+    if flights is not None and len(np.unique(flights)) > 2:
+        row["ci_flight"] = auroc_cluster_ci(s, y, flights, seed=seed)[:2]
+    return row
+
+
+def check_india_baselines(F, y, flight, split, cert_F=None, cert_y=None, seed=SEED):
+    """The 16-statistic logistic regression on the India frames, split by flight, with the cross-site check.
+
+    F: global_features rows; y: 1 = faulty; flight, split: per row, from india_plot_split.csv.
+      group_cv     every India frame scored out of fold, 5 folds of whole flights (logreg_group_cv_scores)
+      random_cv    the same with frames shuffled into folds (logreg_cv_scores), the HER-104 protocol, for contrast
+      plot16 / plot18 / plot16_18
+                   fit on plot 17 (train + train_faulty_unused), scored on plot 16 (val), plot 18 (test), both
+      cross_site   fit on every India frame, scored on cert_F / cert_y (other sites)
+    Each row: n_healthy, n_faulty, AUROC, frame bootstrap CI (hlab.metrics.auroc_ci) and, in-site,
+    the flight bootstrap CI (auroc_cluster_ci). single: every statistic's AUROC on all India frames,
+    oriented above 0.5 (orientation chosen on the same frames, so slightly optimistic).
+    """
+    F, y, flight, split = np.asarray(F, float), np.asarray(y, int), np.asarray(flight), np.asarray(split)
+    out = {"group_cv": _score_row(logreg_group_cv_scores(F, y, flight, seed=seed), y, flight, seed)}
+    s, yy = logreg_cv_scores(F[y == 0], F[y == 1], seed=seed)
+    out["random_cv"] = _score_row(s, yy, np.r_[flight[y == 0], flight[y == 1]], seed)
+    fit_rows = np.isin(split, FIT_SPLITS)
+    fit = logreg_fit(F[fit_rows], y[fit_rows])
+    for name, keep in (("plot16", split == "val"), ("plot18", split == "test"),
+                       ("plot16_18", np.isin(split, ("val", "test")))):
+        out[name] = _score_row(logreg_predict(fit, F[keep]), y[keep], flight[keep], seed)
+    if cert_F is not None and len(cert_F):
+        out["cross_site"] = _score_row(logreg_predict(logreg_fit(F, y), np.asarray(cert_F, float)),
+                                       np.asarray(cert_y, int), seed=seed)
+    aj = [auroc(F[:, j], y) for j in range(len(FEAT))]
+    out["single"] = {k: float(max(v, 1 - v)) for k, v in zip(FEAT, aj)}
+    return out
 
 
 # ---------------------------------------------------------------- scenarios

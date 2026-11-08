@@ -317,3 +317,60 @@ def test_image_formats_counts_mode_and_size(tmp_path):
     Image.fromarray(np.zeros((4, 6, 3), np.uint8)).save(tmp_path / "c.png")
     f = audit.image_formats([tmp_path / n for n in ("a.png", "b.png", "c.png")])
     assert f == {("I;16", "6x4"): 1, ("RGB", "6x4"): 2}
+
+
+# ---------------------------------------------------------------- India audit (HER-131)
+def test_logreg_refactor_keeps_cv_and_group_cv_holds_out_whole_groups():
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(60, 3)); y = (X[:, 0] + 0.3 * rng.normal(size=60) > 0).astype(int)
+    groups = np.repeat(np.arange(12), 5)
+    s = audit.logreg_group_cv_scores(X, y, groups, k=4, iters=300)
+    assert s.shape == (60,) and audit.auroc(s, y) > 0.8
+    fit = audit.logreg_fit(X, y, iters=300)
+    assert np.allclose(audit.logreg_predict(fit, X[:2]), audit.logreg_predict(fit, X)[:2])
+    lo, hi, used = audit.auroc_cluster_ci(s, y, groups, n_boot=200)
+    assert lo <= audit.auroc(s, y) <= hi and used > 150
+
+
+def test_box_spread_and_controls():
+    t = np.full((512, 640), 30.0, np.float32); t[10, 20] = 35.0
+    mm, mn, px = audit.box_spread(t, (19.6, 9.4, 21.2, 11.0))       # rows 9-11, cols 20-21
+    assert (mm, mn, px) == (5.0, 5.0, 6)
+    assert audit.box_pixels((630.0, 500.0, 700.0, 600.0), t.shape) == (500, 512, 630, 640)
+    fb = [("f1", "16.1", "16", (0, 0, 1, 1)), ("f2", "16.9", "16", (0, 0, 1, 1))]
+    healthy = [{"rel_path": "h1", "flight": "16.1", "plot": "16"}, {"rel_path": "h2", "flight": "16.2", "plot": "16"}]
+    ctrl, fallback = audit.control_boxes(fb, healthy)
+    assert fallback == 1 and ctrl["h1"][0][0] == 0 and sum(len(v) for v in ctrl.values()) == 2
+    sp = audit.check_box_spread({"max_minus_median": [3, 4, 5], "max_minus_min": [4, 5, 6]},
+                                {"max_minus_median": [0.5, 1, 1.5], "max_minus_min": [1, 2, 3]})
+    assert sp["max_minus_median"]["auroc"] == 1.0 and sp["max_minus_median"]["control"]["frac_under"] == 1.0
+
+
+def test_shot_order_and_fault_duplicates():
+    names = ["DJI_0003_R.JPG", "DJI_0001_R.JPG", "DJI_0001_R (2).JPG"]
+    taken = {"DJI_0001_R.JPG": "2019:02:16 10:00:00", "DJI_0003_R.JPG": "2019:02:16 10:00:02",
+             "DJI_0001_R (2).JPG": "2019:02:16 11:00:00"}
+    assert sorted(names, key=lambda n: audit.shot_key(n, taken[n])) == ["DJI_0001_R.JPG", "DJI_0003_R.JPG",
+                                                                       "DJI_0001_R (2).JPG"]
+    assert audit.consecutive_groups([5, 1, 2, 8], gap=1) == [[1, 2], [5], [8]]
+    assert audit.consecutive_groups([5, 1, 2, 8], gap=3) == [[1, 2, 5, 8]]
+    order = {"a": [f"DJI_{i:04d}_R.JPG" for i in range(10)]}
+    boxed = {"a": ["DJI_0001_R.JPG", "DJI_0002_R.JPG", "DJI_0006_R.JPG"]}
+    split_of = {("a", n): "test" for n in boxed["a"]}
+    d = audit.check_fault_duplicates(boxed, order, split_of, gaps=(1, 5))
+    assert d[1]["distinct"] == 2 and d[1]["sizes"] == {1: 1, 2: 1} and d[5]["distinct"] == 1
+    assert d[1]["by_split"] == {"test": (3, 2)}
+
+
+def test_check_india_baselines_protocols():
+    rng = np.random.default_rng(4)
+    n = 240
+    y = (rng.random(n) < 0.2).astype(int)
+    F = rng.normal(size=(n, len(audit.FEAT))); F[:, 0] += 2 * y
+    flight = np.array([f"{p}.{i % 4}" for p, i in zip(np.repeat(["16", "17", "18"], n // 3), range(n))])
+    split = np.where(np.char.startswith(flight, "17"), "train", np.where(np.char.startswith(flight, "16"), "val", "test"))
+    b = audit.check_india_baselines(F, y, flight, split, F[:30], y[:30])
+    assert {"group_cv", "random_cv", "plot16", "plot18", "plot16_18", "cross_site", "single"} <= set(b)
+    assert b["group_cv"]["auroc"] > 0.8 and "ci_flight" in b["plot16_18"] and "ci_flight" not in b["cross_site"]
+    assert b["plot16"]["n_healthy"] + b["plot16"]["n_faulty"] == (split == "val").sum()
+    assert max(b["single"], key=b["single"].get) == "mean"
