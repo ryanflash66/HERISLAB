@@ -126,6 +126,50 @@ def best_f1_threshold(scores, labels):
     return float(cands[int(np.argmax(f1))])
 
 
+def _counts_above(scores, labels, cands):
+    """(tp, fp) at ``score > t`` for every threshold in ``cands``."""
+    pos = np.sort(scores[labels == 1])
+    neg = np.sort(scores[labels == 0])
+    tp = len(pos) - np.searchsorted(pos, cands, side="right")
+    fp = len(neg) - np.searchsorted(neg, cands, side="right")
+    return tp, fp
+
+
+def roc_points(scores, labels):
+    """(fpr, tpr) of ``score > t`` over every distinct score plus one threshold below the minimum,
+    ordered from (0, 0) to (1, 1)."""
+    s, y = _check(scores, labels)
+    cands = np.r_[np.unique(s)[::-1], -np.inf]
+    tp, fp = _counts_above(s, y, cands)
+    return fp / max(int((y == 0).sum()), 1), tp / max(int(y.sum()), 1)
+
+
+def tpr_at_fpr(scores, labels, max_fpr):
+    """Highest true-positive rate over the thresholds whose false-positive rate is at most ``max_fpr``."""
+    fpr, tpr = roc_points(scores, labels)
+    return float(tpr[fpr <= max_fpr + 1e-12].max())
+
+
+def average_precision(scores, labels):
+    """AUPRC as average precision: sum over distinct thresholds of (recall step) x precision.
+
+    Each distinct score is one threshold (ties enter together), so the value does not depend on
+    the order of tied images. Chance level is the fault prevalence.
+    """
+    s, y = _check(scores, labels)
+    n_pos = int(y.sum())
+    if n_pos == 0:
+        raise ValueError("average_precision needs at least one fault")
+    cands = np.unique(s)[::-1]
+    pos = np.sort(s[y == 1])
+    neg = np.sort(s[y == 0])
+    tp = len(pos) - np.searchsorted(pos, cands, side="left")      # score >= t
+    fp = len(neg) - np.searchsorted(neg, cands, side="left")
+    recall = tp / n_pos
+    precision = tp / (tp + fp)
+    return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+
+
 def trivial_f1(labels):
     """F1 of flagging every image: 2p / (1 + p) with p the fault prevalence."""
     y = np.asarray(labels).ravel().astype(int)

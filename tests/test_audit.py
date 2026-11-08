@@ -11,6 +11,7 @@ import audit  # noqa: E402
 
 from hlab.bundle import FakeBundle  # noqa: E402
 from hlab.datasets import InMemoryDataset, Split  # noqa: E402
+from hlab.metrics import from_groups  # noqa: E402
 from hlab.rules import DEFAULT_CONFIG_PATH, RuleConfig  # noqa: E402
 
 H, W = 240, 320
@@ -209,3 +210,110 @@ def test_run_scenario_print_and_summary(tmp_path, capsys):
 def test_saved_errors_rejects_unknown_bundle():
     with pytest.raises(ValueError, match="no saved errors"):
         audit.saved_errors("mars")
+
+
+# ---------------------------------------------------------------- HER-110 additions
+def test_check_headline_threshold_free_metrics():
+    h = audit.check_headline(np.array([0.1, 0.2, 0.3, 0.4]), np.array([0.8, 0.9, 1.0]), thr=0.5, seed=0)
+    assert h["auprc"] == 1.0 and h["tpr_at_fpr5"] == 1.0
+    assert h["prevalence"] == pytest.approx(3 / 7)
+    assert h["mean_neg"] == pytest.approx(0.25) and h["mean_pos"] == pytest.approx(0.9)
+
+
+def test_check_cv_threshold_is_seeded_and_bounded():
+    rng = np.random.default_rng(0)
+    neg, pos = rng.normal(0, 1, 60), rng.normal(2, 1, 40)
+    a = audit.check_cv_threshold(neg, pos, repeats=5, seed=1)
+    assert a == audit.check_cv_threshold(neg, pos, repeats=5, seed=1)
+    assert 0 < a["f1_lo"] <= a["f1_mean"] <= a["f1_hi"] <= 1 and a["repeats"] == 5
+    # separable scores: the search keeps the lowest winning threshold (the top TRAIN healthy score),
+    # so a held-out healthy above it is a false positive; F1 stays high but need not be 1
+    sep = audit.check_cv_threshold(np.arange(10) / 10, 5 + np.arange(10), repeats=3)
+    assert 0.9 < sep["f1_mean"] <= 1.0
+
+
+def test_source_auroc_cis_bracket_the_point_estimates():
+    D = _inputs(_pv_dataset())
+    cis = audit.source_auroc_cis(D.neg, D.src, D.fu, seed=0)
+    src = audit.check_source_shortcut(D.neg, D.src, D.fu, 1.0)
+    for key, point in (("om_thm", "auroc_om_thm"), ("om_fault", "auroc_om_fault"), ("thm_fault", "auroc_thm_fault")):
+        lo, hi = cis[key]
+        assert lo <= src[point] + 1e-9 and hi >= src[point] - 1e-9
+    assert audit.source_auroc_cis(D.neg[:6], D.src[:6], D.fu) == {}
+
+
+def test_check_temporal_leakage_within_two_frames():
+    ds = _pv_dataset()
+    # dr_001 in TRAIN is one frame from dr_000 / dr_002 and three from dr_004; sr_010 is far from sr_001..sr_005
+    assert audit.check_temporal_leakage(ds, "holdout", within=2) == (2, 8)
+    assert audit.check_temporal_leakage(ds, "holdout", within=3) == (3, 8)
+
+
+def test_check_frame_correlation_neighbour_beats_random():
+    ho = _pv_dataset().split("holdout")
+    rng = np.random.default_rng(5)
+    train_ids = ["data/raw/om/dr_001.jpg"] + [f"data/raw/om/dr_{i:03d}.jpg" for i in range(50, 56)]
+    x = rng.normal(0, 1, (len(train_ids), H, W)).astype(np.float32)   # far frames: noise
+    x[0] = ho.x[0] + rng.normal(0, 0.01, (H, W))                     # dr_001 almost equals dr_000
+    out = audit.check_frame_correlation(ho, train_ids, x, n_per_sequence=15, seed=0)
+    assert set(out) == {"dr"}                 # no sr holdout frame has a TRAIN neighbour
+    r = out["dr"]
+    assert r["n"] == 2 and len(r["adjacent"]) == len(r["random"]) == 2   # dr_000 and dr_002 flank dr_001
+    assert min(r["adjacent"]) > 0.9 and r["median_adjacent"] > r["median_random"]
+    assert out == audit.check_frame_correlation(ho, train_ids, x, n_per_sequence=15, seed=0)
+
+
+def test_check_test_hashes_duplicates_labels_and_train_pool(tmp_path):
+    rng = np.random.default_rng(0)
+    imgs = [rng.integers(0, 255, (6, 6), dtype=np.uint8) for _ in range(4)]
+
+    def save(name, a):
+        p = tmp_path / name
+        Image.fromarray(a).save(p)
+        return p
+    healthy = [save("h0.png", imgs[0]), save("h1.png", imgs[1])]
+    fault = [save("f0.png", imgs[1]), save("f1.png", imgs[2]), save("f2.png", imgs[2])]
+    train = [save("t0.png", imgs[2]), save("t1.png", imgs[3])]
+    r = audit.check_test_hashes({"healthy": (healthy, 0), "fault": (fault, 1)}, {"train/x": train})
+    h, f = r["sets"]["healthy"], r["sets"]["fault"]
+    assert (h["n_files"], h["n_unique"], h["opposite_label"], h["in_train"]) == (2, 2, 1, 0)
+    assert (f["n_files"], f["n_unique"], f["opposite_label"], f["in_train"]) == (3, 2, 1, 2)
+    assert h["shared"] == {"fault": 1} and f["in_train_by_pool"] == {"train/x": 2}
+    assert r["total"] == {"n_files": 5, "n_unique": 3, "in_train": 2}
+
+
+def test_rule_signals_match_the_verdicts():
+    config = RuleConfig.load(DEFAULT_CONFIG_PATH)
+    flat = np.full((H, W), 120.0)
+    spot = flat.copy(); spot[:100, :200] = 250.0     # 26% of pixels, so p95 lands in the spot
+    s = audit.rule_signals(config, [flat, spot], "pv")
+    assert s.shape == (2,) and s[0] == pytest.approx(0.0) and s[1] > s[0]
+
+
+def test_read_training_log(tmp_path):
+    p = tmp_path / "log.txt"
+    p.write_text("  Train: 70 images\n  Val:   8 images\n  Parameters: 2,352,353\n"
+                 "Epoch   1/50 -- train_loss: 0.5  val_loss: 0.30  lr: 1e-3\n"
+                 "Epoch   2/50 -- train_loss: 0.2  val_loss: 0.10  lr: 1e-3\n"
+                 "Epoch   3/50 -- train_loss: 0.9  val_loss: 1.20  lr: 1e-3\n"
+                 "Early stopping at epoch 3 (no improvement)\nTraining complete in 1.5 min\n", encoding="utf-8")
+    log = audit.read_training_log(p)
+    assert log == dict(n_train=70, n_val=8, parameters=2352353, best_epoch=2, best_val_loss=0.10, spike_epoch=3,
+                       spike_val_loss=1.20, stop_epoch=3, minutes=1.5)
+
+
+def test_figures_are_written(tmp_path):
+    rng = np.random.default_rng(0)
+    om, thm, fu = rng.lognormal(-4.5, 0.4, 50), rng.lognormal(-3, 0.4, 10), rng.lognormal(-2, 0.6, 14)
+    p2 = audit.fig_error_by_source(om, thm, fu, 0.03, tmp_path / "f2.png")
+    s, y = from_groups(np.r_[om, thm], fu)
+    p3 = audit.fig_roc_vs_baselines([("AE", s, y), ("p1", -s, y), ("LR", s ** 2, y)], tmp_path / "f3.png", title="t")
+    assert p2.stat().st_size > 0 and p3.stat().st_size > 0
+
+
+def test_image_formats_counts_mode_and_size(tmp_path):
+    Image.fromarray(np.zeros((4, 6), np.uint16)).save(tmp_path / "a.png")
+    Image.fromarray(np.zeros((4, 6, 3), np.uint8)).save(tmp_path / "b.png")
+    Image.fromarray(np.zeros((4, 6, 3), np.uint8)).save(tmp_path / "c.png")
+    f = audit.image_formats([tmp_path / n for n in ("a.png", "b.png", "c.png")])
+    assert f == {("I;16", "6x4"): 1, ("RGB", "6x4"): 2}

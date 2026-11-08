@@ -1,0 +1,125 @@
+
+======================================================================
+0. Data, split and training (PV specialist)
+======================================================================
+healthy PV images: 8911 (O&M 7836, THM 1075)   TRAIN 8019   HOLDOUT 892   PVMD fault files 1000
+excluded healthy module crops (train/normal/solar_modules): 2302
+THM frames in TRAIN: 991 / 8019 = 12.4%
+healthy image formats (PIL mode, size): {('I;16', '640x512'): 8911}
+PVMD fault image formats (PIL mode, size): {('RGB', '512x512'): 999, ('L', '512x512'): 1}
+normalisation statistics of TRAIN: mean 174.58  std 41.94
+saved F1-optimal threshold tau: 0.027865 (2.79e-02)
+training log: train 7218  val 801  parameters 2,352,353
+  lowest val loss 0.0170 at epoch 5; largest val loss 1.04 at epoch 6; early stop at epoch 15; 10.5 min
+
+======================================================================
+1. PVMD duplicates
+======================================================================
+files: 1000   byte-unique files: 198   pixel-unique images: 140
+byte-unique files of files, by label: {'C': '187 of 350', 'H': '187 of 350', 'S': '136 of 300'}
+files whose pixels also appear under another fault label: 992
+label mix of unique images: {'CHS': 105, 'CH': 30, 'S': 5}
+files with a non-default EXIF orientation tag: 152
+unique images with EXIF orientation applied: 198   files sharing an image with another label: 986
+label mix with EXIF applied: {'CHS': 125, 'CH': 62, 'S': 11}
+
+======================================================================
+2. Test-set hashes (decoded pixels; every test set against its model's training pool)
+======================================================================
+
+PV specialist test set vs PV TRAIN:
+  PV holdout (healthy)               files   892  distinct   892  opposite-label copies    0  in TRAIN pool    0   shared 
+  PVMD (fault)                       files  1000  distinct   140  opposite-label copies    0  in TRAIN pool    0   shared 
+  all of the above: files 1892  distinct images 1032  in TRAIN pool 0
+
+general model test folders vs its TRAIN pool:
+  normal/electric_motor              files    28  distinct    28  opposite-label copies   24  in TRAIN pool    4 {'train/induction_motor': 4}  shared {'fault/induction_motor': 14, 'fault/induction_motor_ambiguous': 10}
+  normal/induction_motor             files     5  distinct     5  opposite-label copies    0  in TRAIN pool    5 {'train/electric_motor': 5}  shared 
+  normal/transformer                 files     4  distinct     4  opposite-label copies    0  in TRAIN pool    0   shared 
+  fault/electric_motor               files   173  distinct   173  opposite-label copies    0  in TRAIN pool    0   shared {'fault/induction_motor': 173}
+  fault/induction_motor              files   279  distinct   278  opposite-label copies   14  in TRAIN pool   92 {'train/electric_motor': 92}  shared {'normal/electric_motor': 14, 'fault/electric_motor': 173}
+  fault/transformer                  files   233  distinct   233  opposite-label copies    0  in TRAIN pool    0   shared 
+  fault/induction_motor_ambiguous    files    65  distinct    65  opposite-label copies   10  in TRAIN pool   55 {'train/electric_motor': 55}  shared {'normal/electric_motor': 10}
+  all of the above: files 787  distinct images 589  in TRAIN pool 156
+general model test set as evaluated (test_normal + test_fault): files 722  distinct images 534  in TRAIN pool 101
+
+======================================================================
+3. Temporal leakage in the PV normal split
+======================================================================
+held-out normals with an immediately adjacent frame in TRAIN: 884 / 892
+held-out normals with a TRAIN frame within two frames: 892 / 892
+O&M dr (double-row): n=15  median r with TRAIN neighbour 0.928   with a random TRAIN frame of the sequence 0.657
+O&M sr (single-row): n=15  median r with TRAIN neighbour 0.904   with a random TRAIN frame of the sequence 0.814
+
+======================================================================
+4. Source shortcut (PV specialist)
+======================================================================
+healthy om : n= 808  median err 0.0098  flagged at thr 6
+healthy thm: n=  84  median err 0.0517  flagged at thr 81
+false positives at tau: THM 81  O&M 6  THM share 93.1%
+unique faults: median err 0.1192  flagged at thr 134 / 140
+AUROC healthy O&M vs healthy THM : 0.996 [0.991, 1.000]
+AUROC healthy O&M vs unique fault: 0.986 [0.969, 0.999]
+AUROC healthy THM vs unique fault: 0.859 [0.808, 0.906]
+
+======================================================================
+5. Headline metrics (Tables III and IV)
+======================================================================
+
+PV, 1000 files: n healthy 892  n fault 1000
+  AUROC 0.9736 [0.965, 0.981]   AUPRC 0.982 (fault prevalence 0.529)   TPR at FPR <= 5% 0.890
+  mean error healthy / fault 0.0155 / 0.1467   flag-everything F1 0.6916
+  at saved threshold : {'tp': 972, 'fn': 28, 'fp': 87, 'tn': 805, 'precision': 0.9178, 'recall': 0.972, 'f1': 0.9441, 'specificity': 0.9025}
+  re-tuned best-F1 (tau 0.028182): {'tp': 972, 'fn': 28, 'fp': 85, 'tn': 807, 'precision': 0.9196, 'recall': 0.972, 'f1': 0.9451, 'specificity': 0.9047}
+  cross-validated tau (5-fold x 200): pooled F1 0.9432 [0.9405, 0.9446]   mean per-fold F1 0.9433   change vs F1 at tau -0.0009
+
+PV, 140 unique: n healthy 892  n fault 140
+  AUROC 0.9740 [0.954, 0.989]   AUPRC 0.921 (fault prevalence 0.136)   TPR at FPR <= 5% 0.871
+  mean error healthy / fault 0.0155 / 0.1442   flag-everything F1 0.2389
+  at saved threshold : {'tp': 134, 'fn': 6, 'fp': 87, 'tn': 805, 'precision': 0.6063, 'recall': 0.9571, 'f1': 0.7424, 'specificity': 0.9025}
+  re-tuned best-F1 (tau 0.068281): {'tp': 112, 'fn': 28, 'fp': 12, 'tn': 880, 'precision': 0.9032, 'recall': 0.8, 'f1': 0.8485, 'specificity': 0.9865}
+  cross-validated tau (5-fold x 200): pooled F1 0.8289 [0.8161, 0.8421]   mean per-fold F1 0.8279   change vs F1 at tau +0.0865
+
+v2 general (not in the paper, HER-105): n healthy 37  n fault 685
+  AUROC 0.9024 [0.866, 0.935]   AUPRC 0.994 (fault prevalence 0.949)   TPR at FPR <= 5% 0.669
+  mean error healthy / fault 0.0008 / 0.0028   flag-everything F1 0.9737
+  at saved threshold : {'tp': 685, 'fn': 0, 'fp': 27, 'tn': 10, 'precision': 0.9621, 'recall': 1.0, 'f1': 0.9807, 'specificity': 0.2703}
+  re-tuned best-F1 (tau 0.000336): {'tp': 685, 'fn': 0, 'fp': 27, 'tn': 10, 'precision': 0.9621, 'recall': 1.0, 'f1': 0.9807, 'specificity': 0.2703}
+
+======================================================================
+6. Trivial baselines (Table VI) and the HER-107 same-transform table
+======================================================================
+PV p1 median healthy / unique fault (0-255): 141.6 / 43.6
+PV (892 healthy vs 140 unique): autoencoder AUROC 0.974
+PV single-statistic AUROC: {'mean': 0.936, 'std': 0.59, 'min': 0.534, 'max': 0.799, 'p1': 0.972, 'p5': 0.964, 'p50': 0.922, 'p95': 0.911, 'p99': 0.847, 'p95_minus_mean': 0.609, 'frac_ge250': 0.708, 'frac_le5': 0.508, 'grad_x': 0.786, 'grad_y': 0.813, 'laplacian': 0.713, 'hist_entropy': 0.783}
+PV best single statistics [('p1', 0.972), ('p5', 0.964), ('mean', 0.936)]
+PV 5-fold logistic regression on 16 statistics AUROC 0.999
+v2 general (not in the paper): best single [('hist_entropy', 0.928), ('mean', 0.914), ('max', 0.902)]  logreg 0.943
+
+HER-107: no-model baselines under each transform, applied the same way to both classes (raw files of the 892 held-out frames and the 140 unique faults)
+| variant | representation | fit | p1_median_healthy | p1_median_fault | auroc_p1 | top3 | logreg |
+|---|---|---|---|---|---|---|---|
+| as_is | scale_by_max | stretch | 141.6 | 43.6 | 0.972 | p1 0.972, p5 0.964, mean 0.936 | 0.999 |
+| crop | scale_by_max | crop | 141.7 | 47.8 | 0.971 | p1 0.971, p5 0.960, mean 0.934 | 1.0 |
+| minmax_crop | minmax | crop | 141.7 | 34.6 | 0.986 | p1 0.986, p5 0.968, frac_le5 0.920 | 0.998 |
+| equalize | equalize | stretch | 2.5 | 2.5 | 0.517 | hist_entropy 0.856, grad_x 0.708, grad_y 0.693 | 0.819 |
+| matched | equalize | crop | 2.5 | 2.5 | 0.52 | hist_entropy 0.829, grad_x 0.697, laplacian 0.580 | 0.788 |
+
+======================================================================
+7. Rule layer (Table VII; config/thresholds_iec.json defaults)
+======================================================================
+dT proxy alone, healthy vs unique fault: AUROC 0.609
+PV healthy (n=892): autoencoder alone flagged 87, passed 805
+  rule tiers {'NORMAL': 383, 'WARNING': 509}  (NORMAL 42.9%, WARNING 57.1%)
+  ensemble {'NORMAL': 349, 'FLAG': 87, 'MONITOR': 456}  (Normal to Monitor: 456 = 51.1%)
+PV unique faults (n=140): autoencoder alone flagged 134, passed 6
+  rule tiers {'NORMAL': 51, 'WARNING': 88, 'ALARM': 1}  (NORMAL 36.4%, WARNING 62.9%, ALARM 0.7%)
+  ensemble {'FLAG': 134, 'NORMAL': 5, 'MONITOR': 1}  (Normal to Monitor: 1 = 0.7%)
+transformer healthy (not in the paper): n=4 AE flags 4  top-oil rule (>120 C) flags 0
+transformer fault (not in the paper): n=233 AE flags 233  top-oil rule (>120 C) flags 40
+
+======================================================================
+8. Figures
+======================================================================
+docs/paper/figs/fig_pv_error_by_source.png
+docs/paper/figs/fig_roc_vs_trivial_baselines.png

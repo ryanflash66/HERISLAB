@@ -1,8 +1,8 @@
 """
 Paper audit checks (HER-130): every check is a function of a Dataset, a Bundle and a keep-mask.
 
-The three entry points (audit_eval_validity.py, audit_her114_reruns.py,
-audit_her114_retrain.py) only choose scenarios and print; the numbers come from
+The entry points (audit_eval_validity.py, the script the paper cites; audit_her107_baselines.py,
+audit_her114_reruns.py, audit_her114_retrain.py) only choose scenarios and print; the numbers come from
 here, and from here only through hlab: metrics (AUROC, bootstrap CI, confusion,
 threshold search), rules (tiers and decisions), datasets (splits, manifests,
 PVMD pixel groups, adjacent frames) and bundle (saved thresholds, never weights).
@@ -10,13 +10,20 @@ No check retrains or re-runs a model: the reconstruction errors are the ones the
 evaluators saved under results/ (saved_errors).
 
 Checks
-  check_pvmd_duplicates()                       pixel-identical PVMD files, with and without the EXIF orientation tag
-  check_temporal_leakage(dataset, split, keep)  held-out frames with an adjacent video frame in TRAIN
+  check_pvmd_duplicates()                       byte- and pixel-identical PVMD files, with and without the EXIF orientation tag
+  image_formats(paths)                          PIL mode and size counts (16-bit vs 8-bit, RGB vs grayscale)
+  check_test_hashes(test_sets, train_pool)      duplicates, cross-label copies and training-pool copies on any test set (HER-105)
+  check_temporal_leakage(dataset, split, keep)  held-out frames with a video frame within `within` steps in TRAIN
+  check_frame_correlation(holdout, ids, x)      pixel correlation of held-out O&M frames with their TRAIN neighbour vs a random frame
   check_source_shortcut(neg, src, fu, thr)      errors by acquisition source, source AUROCs, false positives by source
-  check_headline(neg, pos, thr, seed)           AUROC with bootstrap CI, confusion at the saved and re-tuned thresholds, trivial F1
+  source_auroc_cis(neg, src, fu)                bootstrap intervals of the three source AUROCs
+  check_headline(neg, pos, thr, seed)           AUROC with bootstrap CI, AUPRC, TPR at FPR <= 5%, confusion at the saved and
+                                                re-tuned thresholds, trivial F1
+  check_cv_threshold(neg, pos, k, repeats)      F1 with the threshold chosen by repeated k-fold cross-validation
   check_trivial_baselines(negF, posF, seed)     single global statistics and the 16-statistic logistic regression (no model)
   check_transform_baselines(healthy, faults)    the trivial baselines per hlab.transform variant, from the raw files (HER-107)
   check_stored_baselines(dataset, gid)          the trivial baselines on a PV dataset's stored arrays (pv/, pv_matched/)
+  rule_signals(config, images, equipment)       the rule layer's temperature signal per image (dT proxy for PV)
   check_rule_layer(config, images, equipment, ml_flags)   severity tiers and ensemble decisions, hlab.rules per image
 
 Scenarios
@@ -26,6 +33,8 @@ Scenarios
   write_summary(rows, cols, md, csv)            the side-by-side table
   pv_frame_paths(dataset, gid)                  raw files of a PV dataset's held-out frames and unique faults
   single_statistic_table(rows)                  every statistic's AUROC per transform variant, as Markdown
+  read_training_log(path)                       the numbers the training script logged
+  fig_error_by_source(...), fig_roc_vs_baselines(...)   the paper's Fig. 2 and Fig. 3 (matplotlib, imported on use)
 
 Feature extraction (global_features, FEAT) and the no-model baselines stay
 here: they belong to the audit, not to a detector. Seeds are arguments
@@ -33,6 +42,8 @@ here: they belong to the audit, not to a detector. Seeds are arguments
 is configured by assigning a module global from outside.
 """
 import csv
+import hashlib
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -42,7 +53,8 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # until hlab is installable
 from hlab.datasets import PV_FAULT_FOLDER, adjacent_frame, pvmd_unique_groups  # noqa: E402
-from hlab.metrics import auroc, auroc_ci, best_f1_threshold, confusion, from_groups, trivial_f1  # noqa: E402
+from hlab.metrics import (auroc, auroc_ci, average_precision, best_f1_threshold, confusion, from_groups,  # noqa: E402
+                          roc_points, tpr_at_fpr, trivial_f1)
 from hlab.paths import RAW, RESULTS, ROOT  # noqa: E402
 from hlab.rules import combine, evaluate  # noqa: E402
 from hlab.transform import denormalize, load_gray, to_model_input  # noqa: E402
@@ -93,7 +105,13 @@ def check_pvmd_duplicates(fault_dir=None):
     files, gid, groups = pvmd_unique_groups(fault_dir=fault_dir)
     _, _, groups_t = pvmd_unique_groups(exif_transpose=True, fault_dir=fault_dir)
     exif_tag = {f: Image.open(fault_dir / f).getexif().get(274, 1) for f in files}
+    byte_hash = {f: hashlib.md5((fault_dir / f).read_bytes()).hexdigest() for f in files}
+    by_label = {}
+    for f in files:
+        by_label.setdefault(f[0].upper(), []).append(byte_hash[f])
     return dict(files=files, gid=gid, n_files=len(files), n_unique=len(groups),
+                n_byte_unique=len(set(byte_hash.values())),
+                byte_unique_by_label={k: (len(set(v)), len(v)) for k, v in sorted(by_label.items())},
                 multi_label=_multi_label(groups), label_mix=_label_mix(groups),
                 exif_nondefault=sum(1 for v in exif_tag.values() if v != 1),
                 n_unique_exif=len(groups_t), multi_label_exif=_multi_label(groups_t),
@@ -111,19 +129,83 @@ def unique_first(gid):
 
 
 # ---------------------------------------------------------------- 2. temporal leakage
-def check_temporal_leakage(dataset, split="holdout", keep=None, train="train"):
-    """(frames with an immediately adjacent video frame in the TRAIN manifest, frames checked).
+def check_temporal_leakage(dataset, split="holdout", keep=None, train="train", within=1):
+    """(frames with a video frame at most `within` frames away in the TRAIN manifest, frames checked).
 
-    `split` is a split name or a Split; `keep` restricts it to a scenario's frames.
+    `split` is a split name or a Split; `keep` restricts it to a scenario's frames. within=1 is
+    the immediately adjacent frame.
     """
     s = dataset.split(split) if isinstance(split, str) else split
     ids = s.frame_ids if keep is None else [f for f, k in zip(s.frame_ids, keep) if k]
     trs = {f for f, sp, _src in dataset.manifest() if sp == train}
-    adj = sum(any(adjacent_frame(p, d) in trs for d in (-1, 1)) for p in ids)
+    steps = [d for k in range(1, within + 1) for d in (-k, k)]
+    adj = sum(any(adjacent_frame(p, d) in trs for d in steps) for p in ids)
     return adj, len(ids)
 
 
+def _pearson(a, b):
+    a = np.asarray(a, float).ravel(); b = np.asarray(b, float).ravel()
+    a = a - a.mean(); b = b - b.mean()
+    return float(a @ b / (np.sqrt((a @ a) * (b @ b)) + 1e-12))
+
+
+def check_frame_correlation(holdout, train_ids, train_x, n_per_sequence=15, seed=SEED):
+    """How close a held-out O&M frame is to its adjacent TRAIN frame, against a random TRAIN frame.
+
+    Definition (the Method's frame-correlation sample): per O&M sequence (dr = double-row,
+    sr = single-row), `n_per_sequence` held-out frames that have an adjacent TRAIN frame are
+    drawn with np.random.default_rng(seed). For each, r is the Pearson correlation over all
+    pixels of the preprocessed model inputs (Split.x, z-scored; r does not change under the
+    z-score) between the frame and its TRAIN neighbour (step -1 first, then +1), and between
+    the frame and one TRAIN frame of the same sequence drawn uniformly at random.
+    `train_x` may be a memory map; only the sampled rows are read.
+    Returns {sequence: dict(n, median_adjacent, median_random, adjacent=[...], random=[...])}.
+    """
+    rng = np.random.default_rng(seed)
+    row_of = {f: i for i, f in enumerate(train_ids)}
+    train_seq = {}
+    for i, f in enumerate(train_ids):
+        train_seq.setdefault(Path(f).name.split("_")[0], []).append(i)
+    out = {}
+    for seq in sorted({m.get("sequence", "") for m in holdout.meta} - {""}):
+        cands = []
+        for i, (f, m) in enumerate(zip(holdout.frame_ids, holdout.meta)):
+            if m.get("sequence") != seq:
+                continue
+            nb = next((adjacent_frame(f, d) for d in (-1, 1) if adjacent_frame(f, d) in row_of), None)
+            if nb is not None:
+                cands.append((i, row_of[nb]))
+        if not cands:
+            continue
+        pick = rng.choice(len(cands), min(n_per_sequence, len(cands)), replace=False)
+        adj, rnd = [], []
+        for k in pick:
+            i, j = cands[k]
+            r_j = int(rng.choice(train_seq[seq]))
+            adj.append(_pearson(holdout.x[i], train_x[j]))
+            rnd.append(_pearson(holdout.x[i], train_x[r_j]))
+        out[seq] = dict(n=len(adj), median_adjacent=float(np.median(adj)), median_random=float(np.median(rnd)),
+                        adjacent=adj, random=rnd)
+    return out
+
+
 # ---------------------------------------------------------------- 3. source shortcut
+def source_auroc_cis(neg, src, pos_unique, seed=SEED):
+    """95% stratified bootstrap intervals (hlab.metrics.auroc_ci, 2,000 resamples) of the three source AUROCs.
+
+    Same orientation as check_source_shortcut: O&M vs THM scores THM as the positive class;
+    O&M vs fault and THM vs fault score the unique faults as positive. {} when there is no THM frame.
+    """
+    src = np.asarray(src)
+    is_thm = src == "thm"
+    om, thm = neg[~is_thm], neg[is_thm]
+    if not len(thm):
+        return {}
+    return dict(om_thm=auroc_ci(*from_groups(om, thm), seed=seed),
+                om_fault=auroc_ci(*from_groups(om, pos_unique), seed=seed),
+                thm_fault=auroc_ci(*from_groups(thm, pos_unique), seed=seed))
+
+
 def check_source_shortcut(neg, src, pos_unique, thr, order=("om", "thm")):
     """Healthy errors by acquisition source and the AUROCs that expose a source shortcut.
 
@@ -156,12 +238,49 @@ def check_source_shortcut(neg, src, pos_unique, thr, order=("om", "thm")):
 
 # ---------------------------------------------------------------- 4/5. headline and baselines
 def check_headline(neg, pos, thr, seed=SEED):
-    """AUROC with bootstrap 95% CI, trivial flag-everything F1, confusion at the saved and re-tuned thresholds."""
+    """AUROC with bootstrap 95% CI, trivial flag-everything F1, confusion at the saved and re-tuned thresholds.
+
+    Also the threshold-free AUPRC (hlab.metrics.average_precision) with the fault prevalence
+    (its chance level), the TPR at FPR <= 5% (hlab.metrics.tpr_at_fpr) and the mean score per class.
+    """
     s, y = from_groups(neg, pos)
     lo, hi = auroc_ci(s, y, seed=seed)
     retuned_thr = best_f1_threshold(s, y)
     return dict(auroc=auroc(s, y), ci=(lo, hi), trivial_f1=trivial_f1(y), saved=confusion(s, y, thr),
-                retuned_threshold=retuned_thr, retuned=confusion(s, y, retuned_thr))
+                retuned_threshold=retuned_thr, retuned=confusion(s, y, retuned_thr),
+                auprc=average_precision(s, y), prevalence=float(y.mean()), tpr_at_fpr5=tpr_at_fpr(s, y, 0.05),
+                mean_neg=float(np.mean(neg)), mean_pos=float(np.mean(pos)))
+
+
+def check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED):
+    """F1 when the threshold is chosen by cross-validation instead of on the whole test set.
+
+    Definition (the Method's cross-validated threshold): each of `repeats` repetitions splits
+    the images into `k` stratified folds (healthy and faults permuted separately with
+    np.random.default_rng(seed), as logreg_cv_auroc does). For each fold the threshold is
+    hlab.metrics.best_f1_threshold on the other k-1 folds (the evaluator's own search) and
+    flags the held-out fold at score > threshold. The k held-out folds are pooled, so every image
+    is flagged once per repetition, and F1 is computed on that pooled confusion.
+    Returns dict(f1_mean, f1_lo, f1_hi (2.5 / 97.5 percentiles over repetitions), f1_mean_fold
+    (the mean of per-fold F1 instead of pooled), repeats, k).
+    """
+    s, y = from_groups(neg, pos)
+    rng = np.random.default_rng(seed)
+    pooled, per_fold = [], []
+    i_neg, i_pos = np.flatnonzero(y == 0), np.flatnonzero(y == 1)
+    for _ in range(repeats):
+        folds = [np.r_[a, b] for a, b in zip(np.array_split(rng.permutation(i_neg), k),
+                                             np.array_split(rng.permutation(i_pos), k))]
+        pred = np.zeros(len(y), bool)
+        for f in folds:
+            tr = np.setdiff1d(np.arange(len(y)), f)
+            t = best_f1_threshold(s[tr], y[tr])
+            pred[f] = s[f] > t
+            per_fold.append(confusion(s[f], y[f], t)["f1"])
+        pooled.append(confusion(pred.astype(float), y, 0.5)["f1"])
+    lo, hi = np.percentile(pooled, [2.5, 97.5])
+    return dict(f1_mean=float(np.mean(pooled)), f1_lo=float(lo), f1_hi=float(hi),
+                f1_mean_fold=float(np.mean(per_fold)), repeats=repeats, k=k)
 
 
 FEAT = ["mean", "std", "min", "max", "p1", "p5", "p50", "p95", "p99", "p95_minus_mean",
@@ -185,6 +304,11 @@ def global_features(x, stats):
 
 def logreg_cv_auroc(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1, seed=SEED):
     """5-fold CV logistic regression (standardized, L2), numpy only."""
+    return auroc(*logreg_cv_scores(X_neg, X_pos, k=k, l2=l2, iters=iters, lr=lr, seed=seed))
+
+
+def logreg_cv_scores(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1, seed=SEED):
+    """(out-of-fold probabilities, labels) of the logistic regression logreg_cv_auroc scores."""
     rng = np.random.default_rng(seed)
     X = np.vstack([X_neg, X_pos]); y = np.r_[np.zeros(len(X_neg)), np.ones(len(X_pos))]
     idx_n = rng.permutation(len(X_neg)); idx_p = rng.permutation(len(X_pos)) + len(X_neg)
@@ -200,7 +324,7 @@ def logreg_cv_auroc(X_neg, X_pos, k=5, l2=1.0, iters=3000, lr=0.1, seed=SEED):
             g = A.T @ (p - y[tr]) / len(tr) + l2 * np.r_[0, w[1:]] / len(tr)
             w -= lr * g
         out[f] = 1 / (1 + np.exp(-(np.c_[np.ones(len(f)), (X[f] - mu) / sd] @ w)))
-    return auroc(out, y)
+    return out, y
 
 
 def check_trivial_baselines(neg_features, pos_features, seed=SEED):
@@ -261,7 +385,66 @@ def check_stored_baselines(dataset, gid, seed=SEED):
     return check_trivial_baselines(negF, posF, seed=seed)
 
 
+def image_formats(paths):
+    """{(PIL mode, "WxH"): count} over image files, read from the headers only."""
+    out = Counter()
+    for p in paths:
+        with Image.open(p) as im:
+            out[(im.mode, f"{im.width}x{im.height}")] += 1
+    return dict(out)
+
+
+# ---------------------------------------------------------------- test-set hashes (HER-105)
+_HASHES = {}
+
+
+def pixel_hash(path):
+    """md5 of a file's decoded pixel array (shape, dtype and bytes), as the loader receives it (EXIF tag ignored)."""
+    key = str(path)
+    if key not in _HASHES:
+        a = np.array(Image.open(path))
+        _HASHES[key] = hashlib.md5(f"{a.shape}{a.dtype}".encode() + a.tobytes()).hexdigest()
+    return _HASHES[key]
+
+
+def check_test_hashes(test_sets, train_pool):
+    """Duplicate, cross-label and training-pool checks over any number of test sets.
+
+    test_sets: {name: (paths, label)} with label 0 = healthy, 1 = fault; train_pool: {name: paths}
+    of the images the model under test was trained on. Images are compared by pixel_hash.
+    Per test set: n_files, n_unique (distinct images inside the set), shared (files whose image
+    is also in another test set, by set), opposite_label (files whose image also appears in a
+    test set of the other label), in_train (files whose image is in the training pool, by pool
+    folder). total: n_files and n_unique over all test sets together, and in_train.
+    """
+    train_where = {}
+    for pool, paths in train_pool.items():
+        for p in paths:
+            train_where.setdefault(pixel_hash(p), set()).add(pool)
+    h = {name: [pixel_hash(p) for p in paths] for name, (paths, _lab) in test_sets.items()}
+    label = {name: lab for name, (_paths, lab) in test_sets.items()}
+    sets_of = {}
+    for name, hs in h.items():
+        for x in set(hs):
+            sets_of.setdefault(x, set()).add(name)
+    rows = {}
+    for name, hs in h.items():
+        shared = Counter(o for x in hs for o in sets_of[x] - {name})
+        in_train = Counter(pool for x in hs for pool in train_where.get(x, ()))
+        rows[name] = dict(n_files=len(hs), n_unique=len(set(hs)), shared=dict(shared),
+                          opposite_label=sum(any(label[o] != label[name] for o in sets_of[x]) for x in hs),
+                          in_train=sum(x in train_where for x in hs), in_train_by_pool=dict(in_train))
+    every = [x for hs in h.values() for x in hs]
+    total = dict(n_files=len(every), n_unique=len(set(every)), in_train=sum(x in train_where for x in every))
+    return dict(sets=rows, total=total)
+
+
 # ---------------------------------------------------------------- 6. rule layer
+def rule_signals(config, images_0_255, equipment):
+    """The rule layer's temperature signal (Verdict.signal_c, e.g. the PV hot-spot dT proxy) per image."""
+    return np.array([evaluate(config, img, equipment).signal_c for img in images_0_255])
+
+
 def check_rule_layer(config, images_0_255, equipment, ml_flags):
     """(severity counts, ensemble decision counts, images at ALARM or CRITICAL) via hlab.rules per image."""
     sev, final = [], []
@@ -390,6 +573,82 @@ def single_statistic_table(rows):
     return "\n".join(out)
 
 
+def read_training_log(path):
+    """The numbers the training script logged: train/val sizes, parameters, best and spike epochs, stop, minutes."""
+    text = Path(path).read_text(encoding="utf-8")
+    epochs = [(int(e), float(t), float(v)) for e, t, v in
+              re.findall(r"Epoch\s+(\d+)/\d+ -- train_loss: ([\d.]+)\s+val_loss: ([\d.]+)", text)]
+    best = min(epochs, key=lambda r: r[2])
+    worst = max(epochs, key=lambda r: r[2])
+    num = lambda pat: re.search(pat, text).group(1)  # noqa: E731
+    stop = re.search(r"Early stopping at epoch (\d+)", text)
+    return dict(n_train=int(num(r"Train:\s+(\d+)")), n_val=int(num(r"Val:\s+(\d+)")),
+                parameters=int(num(r"Parameters: ([\d,]+)").replace(",", "")),
+                best_epoch=best[0], best_val_loss=best[2], spike_epoch=worst[0], spike_val_loss=worst[2],
+                stop_epoch=int(stop.group(1)) if stop else None, minutes=float(num(r"complete in ([\d.]+) min")))
+
+
+# ---------------------------------------------------------------- paper figures
+_COLORS = {"om": "#2a7bd6", "thm": "#e8683a", "fault": "#1aaf7a", "grid": "#e6e6e6", "ink": "#4d4d4d"}
+
+
+def _figure_style(plt):
+    plt.rcParams.update({"font.size": 9, "axes.edgecolor": _COLORS["ink"], "axes.labelcolor": "black",
+                         "xtick.color": _COLORS["ink"], "ytick.color": _COLORS["ink"],
+                         "axes.spines.top": False, "axes.spines.right": False})
+
+
+def fig_error_by_source(neg_om, neg_thm, fault_unique, thr, path):
+    """Fig. 2: per-image reconstruction error (log scale) of healthy O&M, healthy THM and unique faults, with tau."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _figure_style(plt)
+    groups = [(neg_om, f"Healthy, O&M source (n={len(neg_om)})", _COLORS["om"]),
+              (neg_thm, f"Healthy, THM source (n={len(neg_thm)})", _COLORS["thm"]),
+              (fault_unique, f"PVMD fault, unique images (n={len(fault_unique)})", _COLORS["fault"])]
+    every = np.concatenate([g[0] for g in groups])
+    bins = np.logspace(np.log10(every.min()), np.log10(every.max()), 45)
+    fig, ax = plt.subplots(figsize=(7.2, 3.0))
+    for e, lab, c in groups:
+        ax.hist(e, bins=bins, weights=np.full(len(e), 1 / len(e)), histtype="step", lw=1.8, color=c, label=lab)
+    ax.axvline(thr, ls="--", lw=1.0, color=_COLORS["ink"])
+    ax.text(thr * 0.95, ax.get_ylim()[1] * 0.97, "F1-optimal\nthreshold", ha="right", va="top", fontsize=8,
+            color=_COLORS["ink"])
+    ax.set_xscale("log")
+    ax.yaxis.grid(True, color=_COLORS["grid"]); ax.set_axisbelow(True)
+    ax.set_xlabel("Per-image reconstruction MSE (z-scored units, log scale)")
+    ax.set_ylabel("Fraction of group")
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+    return path
+
+
+def fig_roc_vs_baselines(curves, path, title=None):
+    """Fig. 3: ROC curves; `curves` is [(label, scores, labels), ...] and each legend entry carries its AUROC."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _figure_style(plt)
+    fig, ax = plt.subplots(figsize=(3.6, 3.3))
+    for (lab, s, y), c in zip(curves, (_COLORS["om"], _COLORS["thm"], _COLORS["fault"])):
+        fpr, tpr = roc_points(s, y)
+        ax.step(fpr, tpr, where="post", lw=1.8, color=c, label=f"{lab} ({auroc(s, y):.3f})")
+    ax.plot([0, 1], [0, 1], ls=":", lw=0.8, color="#bbbbbb")
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1.005)
+    ax.grid(True, color=_COLORS["grid"]); ax.set_axisbelow(True)
+    ax.set_xlabel("False positive rate"); ax.set_ylabel("True positive rate")
+    if title:
+        ax.set_title(title, fontsize=9)
+    ax.legend(frameon=False, fontsize=7, loc="lower right", title="AUROC in parentheses", title_fontsize=7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+    return path
+
+
 def write_summary(rows, cols, md_path, csv_path):
     """Write the scenario rows as a Markdown table and a CSV; returns the Markdown."""
     md = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
@@ -402,3 +661,9 @@ def write_summary(rows, cols, md_path, csv_path):
         for r in rows:
             w.writerow({c: r.get(c, "") for c in cols})
     return text
+
+
+if __name__ == "__main__":      # `python docs/paper/audit.py` prints the paper report, as audit_eval_validity.py does
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from audit_eval_validity import main
+    main()
