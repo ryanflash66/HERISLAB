@@ -71,14 +71,14 @@ PV, 1000 files: n healthy 892  n fault 1000
   mean error healthy / fault 0.0155 / 0.1467   flag-everything F1 0.6916
   at saved threshold : {'tp': 972, 'fn': 28, 'fp': 87, 'tn': 805, 'precision': 0.9178, 'recall': 0.972, 'f1': 0.9441, 'specificity': 0.9025}
   re-tuned best-F1 (tau 0.028182): {'tp': 972, 'fn': 28, 'fp': 85, 'tn': 807, 'precision': 0.9196, 'recall': 0.972, 'f1': 0.9451, 'specificity': 0.9047}
-  cross-validated tau (5-fold x 200): pooled F1 0.9432 [0.9405, 0.9446]   mean per-fold F1 0.9433   change vs F1 at tau -0.0009
+  cross-validated tau (5-fold x 200, folds keep each unique fault's copies together): pooled F1 0.9368 [0.9281, 0.9414]   mean per-fold F1 0.9361   change vs F1 at tau -0.0073
 
 PV, 140 unique: n healthy 892  n fault 140
   AUROC 0.9740 [0.954, 0.989]   AUPRC 0.921 (fault prevalence 0.136)   TPR at FPR <= 5% 0.871
   mean error healthy / fault 0.0155 / 0.1442   flag-everything F1 0.2389
   at saved threshold : {'tp': 134, 'fn': 6, 'fp': 87, 'tn': 805, 'precision': 0.6063, 'recall': 0.9571, 'f1': 0.7424, 'specificity': 0.9025}
   re-tuned best-F1 (tau 0.068281): {'tp': 112, 'fn': 28, 'fp': 12, 'tn': 880, 'precision': 0.9032, 'recall': 0.8, 'f1': 0.8485, 'specificity': 0.9865}
-  cross-validated tau (5-fold x 200): pooled F1 0.8289 [0.8161, 0.8421]   mean per-fold F1 0.8279   change vs F1 at tau +0.0865
+  cross-validated tau (5-fold x 200, folds by image): pooled F1 0.8289 [0.8161, 0.8421]   mean per-fold F1 0.8279   change vs F1 at tau +0.0865
 
 v2 general (not in the paper, HER-105): n healthy 37  n fault 685
   AUROC 0.9024 [0.866, 0.935]   AUPRC 0.994 (fault prevalence 0.949)   TPR at FPR <= 5% 0.669

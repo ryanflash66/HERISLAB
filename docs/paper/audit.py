@@ -19,7 +19,8 @@ Checks
   source_auroc_cis(neg, src, fu)                bootstrap intervals of the three source AUROCs
   check_headline(neg, pos, thr, seed)           AUROC with bootstrap CI, AUPRC, TPR at FPR <= 5%, confusion at the saved and
                                                 re-tuned thresholds, trivial F1
-  check_cv_threshold(neg, pos, k, repeats)      F1 with the threshold chosen by repeated k-fold cross-validation
+  check_cv_threshold(neg, pos, k, repeats, pos_groups)   F1 with the threshold chosen by repeated k-fold
+                                                cross-validation; pos_groups keeps duplicate faults in one fold
   check_trivial_baselines(negF, posF, seed)     single global statistics and the 16-statistic logistic regression (no model)
   check_transform_baselines(healthy, faults)    the trivial baselines per hlab.transform variant, from the raw files (HER-107)
   check_stored_baselines(dataset, gid)          the trivial baselines on a PV dataset's stored arrays (pv/, pv_matched/)
@@ -252,7 +253,14 @@ def check_headline(neg, pos, thr, seed=SEED):
                 mean_neg=float(np.mean(neg)), mean_pos=float(np.mean(pos)))
 
 
-def check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED):
+def _group_folds(rng, idx, groups, k):
+    """`idx` split into k folds of whole groups (groups permuted with `rng`). With one item per
+    group this draws the same permutation as rng.permutation(idx), so ungrouped folds are unchanged."""
+    ug = np.unique(groups)
+    return [idx[np.isin(groups, ug[part])] for part in np.array_split(rng.permutation(len(ug)), k)]
+
+
+def check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED, pos_groups=None):
     """F1 when the threshold is chosen by cross-validation instead of on the whole test set.
 
     Definition (the Method's cross-validated threshold): each of `repeats` repetitions splits
@@ -261,6 +269,9 @@ def check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED):
     hlab.metrics.best_f1_threshold on the other k-1 folds (the evaluator's own search) and
     flags the held-out fold at score > threshold. The k held-out folds are pooled, so every image
     is flagged once per repetition, and F1 is computed on that pooled confusion.
+    pos_groups: a group index per fault (the PVMD pixel group, gid). Folds then split whole groups,
+    so copies of one fault image never sit on both sides of a fold; None folds faults one by one.
+    Healthy frames are always folded one by one.
     Returns dict(f1_mean, f1_lo, f1_hi (2.5 / 97.5 percentiles over repetitions), f1_mean_fold
     (the mean of per-fold F1 instead of pooled), repeats, k).
     """
@@ -268,9 +279,12 @@ def check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED):
     rng = np.random.default_rng(seed)
     pooled, per_fold = [], []
     i_neg, i_pos = np.flatnonzero(y == 0), np.flatnonzero(y == 1)
+    g_pos = np.arange(len(i_pos)) if pos_groups is None else np.asarray(pos_groups)
+    if len(g_pos) != len(i_pos):
+        raise ValueError(f"{len(g_pos)} fault groups for {len(i_pos)} faults")
     for _ in range(repeats):
         folds = [np.r_[a, b] for a, b in zip(np.array_split(rng.permutation(i_neg), k),
-                                             np.array_split(rng.permutation(i_pos), k))]
+                                             _group_folds(rng, i_pos, g_pos, k))]
         pred = np.zeros(len(y), bool)
         for f in folds:
             tr = np.setdiff1d(np.arange(len(y)), f)
@@ -508,7 +522,8 @@ def run_scenario(name, keep, inputs, thr, seed=SEED):
     src = inputs.seq[keep]
     negF, posF_u = inputs.features()
     S = {"scenario": name, "n_healthy": int(len(n)), "n_thm": int((src == "thm").sum()),
-         "n_om": int((src != "thm").sum())}
+         "n_om": int((src != "thm").sum()), "n_fault_files": int(len(inputs.pos)),
+         "n_fault_unique": int(len(inputs.fu))}
     S["leak_adjacent"], S["_n_checked"] = check_temporal_leakage(inputs.dataset, inputs.holdout, keep=keep)
     for key, pos in (("files", inputs.pos), ("unique", inputs.fu)):
         h = check_headline(n, pos, thr, seed=seed)
@@ -534,7 +549,7 @@ def print_scenario(S):
     """The report block of one scenario, as results/her-114/rerun_<scenario>.txt shows it."""
     print(f"healthy frames kept: {S['n_healthy']}  (O&M {S['n_om']}, THM {S['n_thm']})")
     print(f"held-out healthy with an adjacent frame in TRAIN: {S['leak_adjacent']} / {S['_n_checked']}")
-    for lab, key in (("1000 files", "files"), ("140 unique", "unique")):
+    for lab, key in ((f"{S['n_fault_files']} files", "files"), (f"{S['n_fault_unique']} unique", "unique")):
         h = S[f"_{key}"]
         print(f"\n{lab}: AUROC {h['auroc']:.4f} [{h['ci'][0]:.3f}, {h['ci'][1]:.3f}]  "
               f"flag-everything F1 {h['trivial_f1']:.4f}")
