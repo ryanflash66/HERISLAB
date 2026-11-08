@@ -149,3 +149,23 @@ def test_average_precision_hand_computed_and_chance_level():
     assert M.average_precision(s, y) == pytest.approx(0.5 * 1.0 + 0.5 * (2 / 3))
     assert M.average_precision(np.ones(10), np.r_[np.ones(3), np.zeros(7)].astype(int)) == pytest.approx(0.3)
     assert M.average_precision([0.1, 0.9], [0, 1]) == 1.0
+
+
+def test_pr_points_area_is_average_precision():
+    rng = np.random.default_rng(3)
+    s = np.round(rng.normal(size=60), 1)                       # ties on purpose
+    y = (rng.random(60) < 0.4).astype(int)
+    rec, prec = M.pr_points(s, y)
+    assert rec[0] == 1.0 and (rec[-1], prec[-1]) == (0.0, 1.0)
+    assert np.all(np.diff(rec) <= 0)
+    # steps-post with recall decreasing: precision P_k holds over (R_k-1, R_k]
+    assert float(np.sum(-np.diff(rec) * prec[:-1])) == pytest.approx(M.average_precision(s, y))
+
+
+def test_average_precision_ci_is_seeded_and_brackets():
+    rng = np.random.default_rng(0)
+    s, y = M.from_groups(rng.normal(0, 1, 80), rng.normal(1.5, 1, 30))
+    a = M.average_precision_ci(s, y, n_boot=300, seed=1)
+    assert a == M.average_precision_ci(s, y, n_boot=300, seed=1)
+    assert a[0] < M.average_precision(s, y) < a[1]
+    assert M.average_precision_ci([0.1, 0.2, 0.9, 1.0], [0, 0, 1, 1], n_boot=50) == (1.0, 1.0)
