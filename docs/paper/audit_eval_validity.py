@@ -182,7 +182,8 @@ def main():
     iv = check_unique_intervals(D.neg, D.fu, thr=pv_thr, seed=SEED)
     for k, (p, lo, hi) in iv.items():
         print(f"  {k:12s} {p:.4f} [{lo:.4f}, {hi:.4f}]")
-    print("  (precision, recall and F1 at the saved test-tuned tau; HER-97 replaces it with a frozen validation tau)")
+    print(f"  (precision, recall and F1 at the saved tau {pv_thr:.6f} from {pv.metrics_path.name}, the threshold "
+          f"section 5 uses; HER-97 replaces this with a tau frozen on a validation half)")
     rt = check_headline(D.neg, D.fu, pv_thr, seed=SEED)["retuned_threshold"]
     iv_rt = check_unique_intervals(D.neg, D.fu, thr=rt, seed=SEED)
     print(f"  at the tau re-selected on the deduplicated set ({rt:.6f}, held fixed across resamples): " +
