@@ -19,6 +19,8 @@ Sections (one or more check functions each in audit.py; this file picks the inpu
   4. Source shortcut: AE error by acquisition source (O&M vs THM), source AUROCs with bootstrap CIs
   5. Headline metrics (Tables III and IV): AUROC with bootstrap CI, AUPRC, TPR at FPR <= 5%,
      confusion at the saved and re-tuned thresholds, the cross-validated threshold
+  5b. Repeated runs and intervals (HER-120): bootstrap intervals over the 892 healthy frames and the
+     140 unique faults, and the per-seed table of src/experiments/seed_runs_pv.py
   6. Trivial baselines (Table VI): single global statistics and the 16-statistic logistic regression,
      and the HER-107 same-transform table (the trivial baselines under each hlab.transform variant)
   7. Rule layer (Table VII): dT-proxy AUROC, tier distribution and ensemble verdicts via hlab.rules
@@ -35,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
-from audit import (PVInputs, SEED, check_cv_threshold, check_frame_correlation, check_headline,  # noqa: E402
+from audit import (PVInputs, SEED, check_cv_threshold, check_seed_runs, check_unique_intervals, check_frame_correlation, check_headline,  # noqa: E402
                    check_pvmd_duplicates, check_rule_layer, check_source_shortcut, check_temporal_leakage,
                    check_test_hashes, check_transform_baselines, image_formats, check_trivial_baselines, fig_error_by_source,
                    fig_roc_vs_baselines, global_features, logreg_cv_scores, pv_frame_paths, read_training_log,
@@ -173,6 +175,47 @@ def main():
             print(f"  cross-validated tau ({cv['k']}-fold x {cv['repeats']}, {by}): pooled F1 {cv['f1_mean']:.4f} "
                   f"[{cv['f1_lo']:.4f}, {cv['f1_hi']:.4f}]   mean per-fold F1 {cv['f1_mean_fold']:.4f}   "
                   f"change vs F1 at tau {cv['f1_mean'] - h['saved']['f1']:+.4f}")
+
+    header("5b. Repeated runs and intervals on the deduplicated set (HER-120)")
+    print(f"95% stratified bootstrap, 2,000 resamples, seed {SEED}: {len(D.neg)} healthy frames and "
+          f"{len(D.fu)} unique fault images (one mean error each) resampled, not the {len(D.pos)} files")
+    iv = check_unique_intervals(D.neg, D.fu, thr=pv_thr, seed=SEED)
+    for k, (p, lo, hi) in iv.items():
+        print(f"  {k:12s} {p:.4f} [{lo:.4f}, {hi:.4f}]")
+    print("  (precision, recall and F1 at the saved test-tuned tau; HER-97 replaces it with a frozen validation tau)")
+    rt = check_headline(D.neg, D.fu, pv_thr, seed=SEED)["retuned_threshold"]
+    iv_rt = check_unique_intervals(D.neg, D.fu, thr=rt, seed=SEED)
+    print(f"  at the tau re-selected on the deduplicated set ({rt:.6f}, held fixed across resamples): " +
+          "   ".join(f"{k} {iv_rt[k][0]:.4f} [{iv_rt[k][1]:.4f}, {iv_rt[k][2]:.4f}]" for k in ("precision", "recall", "f1")))
+    seed_runs = sorted((RESULTS / "her-120").glob("pv_seed*_normal_errors.npy"),
+                       key=lambda q: int(q.name[len("pv_seed"):].split("_")[0]))
+    runs = []
+    for q in seed_runs:
+        s = q.name[len("pv_seed"):].split("_")[0]
+        neg_s = np.load(q)
+        pos_s = np.load(q.with_name(f"pv_seed{s}_fault_errors.npy"))
+        runs.append((f"seed {s}", neg_s, pos_s, read_training_log(RESULTS / "her-120" / f"training_log_pv_seed{s}.txt")))
+    recorded = check_seed_runs([("recorded (paper)", D.neg, D.pos, log)], D.gid)["rows"][0]
+    print(f"\nrepeated training runs: config/training.json 'pv' recipe (lr 1e-3, no clipping, val holdout seed 43), "
+          f"torch seed varied; every run scored on the same {len(D.neg)} healthy frames and {len(D.fu)} unique faults")
+    print(f"spike = an epoch whose val loss is at least {audit.SPIKE_RATIO:g}x the lowest val loss before it")
+    if runs:
+        sr = check_seed_runs(runs, D.gid)
+        print("| run | best epoch | best val loss | epochs run | largest val-loss jump | spike | AUROC | AUPRC | TPR at FPR <= 5% |")
+        print("|---|---|---|---|---|---|---|---|---|")
+        for r in [recorded] + sr["rows"]:
+            jump = f"{r['jump']:.1f}x at epoch {r['jump_epoch']}" if r["jump_epoch"] else "-"
+            print(f"| {r['label']} | {r['best_epoch']} | {r['best_val_loss']:.4f} | {r['epochs_run']} | {jump} | "
+                  f"{'yes' if r['spike'] else 'no'} | {r['auroc']:.4f} | {r['auprc']:.4f} | {r['tpr_at_fpr5']:.4f} |")
+        print(f"\n{sr['n']} seeded runs, {sr['n_spike']} with a spike. mean, SD, range over the seeded runs:")
+        for k, (m, sd, lo, hi) in sr["summary"].items():
+            fmt = "{:.1f}" if k == "best_epoch" else "{:.4f}"
+            print(f"  {k:13s} mean {fmt.format(m)}  SD {fmt.format(sd)}  range {fmt.format(lo)} to {fmt.format(hi)}")
+        print("  (precision and recall per seed wait for the frozen validation threshold of HER-97)")
+    else:
+        print("no seed runs under results/her-120 (src/experiments/seed_runs_pv.py): single-run numbers only")
+    print(f"\nsingle-run vs multi-run: every number in sections 0 to 8 except the seed table above comes from the "
+          f"single recorded training run; the seed table is the only multi-run result ({len(runs)} seeds).")
 
     header("6. Trivial baselines (Table VI) and the HER-107 same-transform table")
     pvnF, pvfF_u = D.features()
