@@ -16,7 +16,7 @@ glob = ["*.csv", "*.pdf", "*.docx", "*.odt", "*.pptx", "*.png", "*.jpg", "data/*
 [pr_reviewer]
 num_max_findings = 5
 require_tests_review = true
-require_security_review = false
+require_security_review = true
 require_estimate_effort_to_review = false
 require_ticket_analysis_review = false
 extra_instructions = """\
@@ -28,6 +28,27 @@ Prioritize, in order:
 - reproducibility: fixed seeds, configs read from config/, no hard-coded local paths
 - numbers in README or docs/paper that the changed code no longer produces
 Skip style nits.
+
+Security section (rules adapted from Cloudflare's security-audit skill,
+github.com/cloudflare/security-audit-skill, MIT):
+Report a security concern only when you can name who controls the input,
+what that input is, which check it gets past, and the concrete result.
+If you cannot, answer No. A missing best practice or a defense-in-depth gap
+is not a security concern. Do not flag np.load(allow_pickle=True) on files
+this pipeline writes itself. In this repo, look for changes that add:
+- loading of files from outside the repo or pipeline in a way that can run
+  code: pickle, np.load(allow_pickle=True), torch.load without
+  weights_only=True, yaml.load without a safe loader
+- code or weights fetched at run time (torch.hub.load, pip installs,
+  downloads) without a pinned commit, version or hash
+- secrets, tokens, personal absolute paths or private data in code,
+  configs, notebooks or docs
+- workflow changes under .github/: pull_request_target or workflow_run
+  triggers, PR titles, branch names or comment text used inside run: steps,
+  actions not pinned to a release or commit, wider permissions, or secrets
+  reachable from fork PRs or non-owners
+- subprocess or os.system commands built from file names or other
+  untrusted strings
 """
 
 [pr_code_suggestions]
