@@ -66,11 +66,13 @@ AUROC healthy THM vs unique fault: 0.859 [0.808, 0.906]
 ======================================================================
 5. Headline metrics (Tables III and IV)
 ======================================================================
+AUPRC = average precision: the sum over distinct score thresholds t (flag when score >= t; tied scores enter together) of (recall step) x precision; chance level is the fault prevalence.
+95% CIs (AUROC and AUPRC): 2,000 bootstrap draws, healthy and fault resampled separately, seed 0
 tau is the best-F1 point of the validation half, frozen; the confusion is the test half's, once.
 The PV tau was chosen with one score per unique fault (the 140 unique row is the headline).
 
 PV, 140 unique: n healthy 892  n fault 140
-  every image, threshold-free: AUROC 0.9740 [0.954, 0.989]   AUPRC 0.921 (fault prevalence 0.136)   TPR at FPR <= 5% 0.871
+  every image, threshold-free: AUROC 0.9740 [0.954, 0.989]   AUPRC 0.921 [0.887, 0.951] (fault prevalence 0.136)   TPR at FPR <= 5% 0.871
   mean error healthy / fault 0.0155 / 0.1442
   validation half (healthy 446, fault 69) at tau 0.076174: {'tp': 57, 'fn': 12, 'fp': 3, 'tn': 443, 'precision': 0.95, 'recall': 0.8261, 'f1': 0.8837, 'specificity': 0.9933}
   TEST HALF (healthy 446, fault 71) at tau 0.076174: {'tp': 51, 'fn': 20, 'fp': 5, 'tn': 441, 'precision': 0.9107, 'recall': 0.7183, 'f1': 0.8031, 'specificity': 0.9888}
@@ -80,14 +82,14 @@ PV, 140 unique: n healthy 892  n fault 140
   cross-validated tau over every image (5-fold x 200, folds by image): pooled F1 0.8289 [0.8161, 0.8421]   mean per-fold F1 0.8279
 
 PV, 1000 files: n healthy 892  n fault 1000
-  every image, threshold-free: AUROC 0.9736 [0.965, 0.981]   AUPRC 0.982 (fault prevalence 0.529)   TPR at FPR <= 5% 0.890
+  every image, threshold-free: AUROC 0.9736 [0.965, 0.981]   AUPRC 0.982 [0.977, 0.986] (fault prevalence 0.529)   TPR at FPR <= 5% 0.890
   mean error healthy / fault 0.0155 / 0.1467
   TEST HALF (healthy 446, fault 493) at tau 0.076174: {'tp': 365, 'fn': 128, 'fp': 5, 'tn': 441, 'precision': 0.9865, 'recall': 0.7404, 'f1': 0.8459, 'specificity': 0.9888}
     test-half AUROC 0.9542   test-half flag-everything F1 0.6885
   cross-validated tau over every image (5-fold x 200, folds keep each unique fault's copies together): pooled F1 0.9368 [0.9281, 0.9414]   mean per-fold F1 0.9361
 
 v2 general (not in the paper, HER-105): n healthy 37  n fault 685
-  every image, threshold-free: AUROC 0.9024 [0.866, 0.935]   AUPRC 0.994 (fault prevalence 0.949)   TPR at FPR <= 5% 0.669
+  every image, threshold-free: AUROC 0.9024 [0.866, 0.935]   AUPRC 0.994 [0.992, 0.996] (fault prevalence 0.949)   TPR at FPR <= 5% 0.669
   mean error healthy / fault 0.0008 / 0.0028
   validation half (healthy 18, fault 339) at tau 0.000336: {'tp': 339, 'fn': 0, 'fp': 11, 'tn': 7, 'precision': 0.9686, 'recall': 1.0, 'f1': 0.984, 'specificity': 0.3889}
   TEST HALF (healthy 19, fault 346) at tau 0.000336: {'tp': 346, 'fn': 0, 'fp': 16, 'tn': 3, 'precision': 0.9558, 'recall': 1.0, 'f1': 0.9774, 'specificity': 0.1579}
@@ -172,3 +174,4 @@ transformer fault, test half (not in the paper): n=117 AE flags 117  top-oil rul
 ======================================================================
 docs/paper/figs/fig_pv_error_by_source.png
 docs/paper/figs/fig_roc_vs_trivial_baselines.png
+docs/paper/figs/fig_pr_original_vs_dedup.png
