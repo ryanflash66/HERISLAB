@@ -215,7 +215,7 @@ def test_saved_errors_rejects_unknown_bundle():
 # ---------------------------------------------------------------- HER-110 additions
 def test_check_headline_threshold_free_metrics():
     h = audit.check_headline(np.array([0.1, 0.2, 0.3, 0.4]), np.array([0.8, 0.9, 1.0]), thr=0.5, seed=0)
-    assert h["auprc"] == 1.0 and h["tpr_at_fpr5"] == 1.0
+    assert h["auprc"] == 1.0 and h["auprc_ci"] == (1.0, 1.0) and h["tpr_at_fpr5"] == 1.0
     assert h["prevalence"] == pytest.approx(3 / 7)
     assert h["mean_neg"] == pytest.approx(0.25) and h["mean_pos"] == pytest.approx(0.9)
 
@@ -362,6 +362,8 @@ def test_figures_are_written(tmp_path):
     s, y = from_groups(np.r_[om, thm], fu)
     p3 = audit.fig_roc_vs_baselines([("AE", s, y), ("p1", -s, y), ("LR", s ** 2, y)], tmp_path / "f3.png", title="t")
     assert p2.stat().st_size > 0 and p3.stat().st_size > 0
+    p4 = audit.fig_pr_curves([("all", s, y), ("dedup", s[:-3], y[:-3])], tmp_path / "pr.png", title="t")
+    assert p4.stat().st_size > 0
 
 
 def test_image_formats_counts_mode_and_size(tmp_path):

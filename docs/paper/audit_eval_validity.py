@@ -17,14 +17,15 @@ Sections (one or more check functions each in audit.py; this file picks the inpu
   3. Temporal leakage: held-out PV frames with an adjacent (and a two-away) frame in TRAIN, and the
      frame-correlation sample
   4. Source shortcut: AE error by acquisition source (O&M vs THM), source AUROCs with bootstrap CIs
-  5. Headline metrics (Tables III and IV): AUROC with bootstrap CI, AUPRC, TPR at FPR <= 5%,
+  5. Headline metrics (Tables III and IV): AUROC and AUPRC with bootstrap CIs, TPR at FPR <= 5%,
      confusion at the saved and re-tuned thresholds, the cross-validated threshold
   5b. Repeated runs and intervals (HER-120): bootstrap intervals over the 892 healthy frames and the
      140 unique faults, and the per-seed table of src/experiments/seed_runs_pv.py
   6. Trivial baselines (Table VI): single global statistics and the 16-statistic logistic regression,
      and the HER-107 same-transform table (the trivial baselines under each hlab.transform variant)
   7. Rule layer (Table VII): dT-proxy AUROC, tier distribution and ensemble verdicts via hlab.rules
-  8. Figures: docs/paper/figs/fig_pv_error_by_source.png (Fig. 2), fig_roc_vs_trivial_baselines.png (Fig. 3)
+  8. Figures: docs/paper/figs/fig_pv_error_by_source.png (Fig. 2), fig_roc_vs_trivial_baselines.png (Fig. 3),
+     fig_pr_original_vs_dedup.png (precision-recall, original and deduplicated test sets, HER-116)
 
 Usage:
     venv\\Scripts\\python.exe docs\\paper\\audit_eval_validity.py
@@ -37,10 +38,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
-from audit import (PVInputs, SEED, check_cv_threshold, check_seed_runs, check_unique_intervals, check_frame_correlation, check_headline,  # noqa: E402
+from audit import (AUPRC_DEF, PVInputs, SEED, check_cv_threshold, check_seed_runs, check_unique_intervals,  # noqa: E402
+                   check_frame_correlation, check_headline,
                    check_pvmd_duplicates, check_rule_layer, check_source_shortcut, check_temporal_leakage,
                    check_test_hashes, check_transform_baselines, image_formats, check_trivial_baselines, fig_error_by_source,
-                   fig_roc_vs_baselines, global_features, logreg_cv_scores, pv_frame_paths, read_training_log,
+                   fig_pr_curves, fig_roc_vs_baselines, global_features, logreg_cv_scores, pv_frame_paths, read_training_log,
                    rounded, rule_signals, saved_errors, source_auroc_cis, unique_first)
 from hlab.bundle import Bundle  # noqa: E402
 from hlab.datasets import V2_FOLDERS, Dataset, raw_files  # noqa: E402
@@ -157,13 +159,16 @@ def main():
     print(f"AUROC healthy THM vs unique fault: {src['auroc_thm_fault']:.3f} {ci(cis['thm_fault'])}")
 
     header("5. Headline metrics (Tables III and IV)")
+    print(f"AUPRC = {AUPRC_DEF}.\n95% CIs (AUROC and AUPRC): 2,000 bootstrap draws, healthy and fault resampled "
+          f"separately, seed {SEED}")
     gn, gf = saved_errors(v2)
     for name, neg, pos, thr, groups in [(f"PV, {len(D.pos)} files", D.neg, D.pos, pv_thr, D.gid),
                                         (f"PV, {len(D.fu)} unique", D.neg, D.fu, pv_thr, None),
                                         ("v2 general (not in the paper, HER-105)", gn, gf, v2_thr, None)]:
         h = check_headline(neg, pos, thr, seed=SEED)
         print(f"\n{name}: n healthy {len(neg)}  n fault {len(pos)}")
-        print(f"  AUROC {h['auroc']:.4f} {ci(h['ci'])}   AUPRC {h['auprc']:.3f} (fault prevalence {h['prevalence']:.3f})"
+        print(f"  AUROC {h['auroc']:.4f} {ci(h['ci'])}   AUPRC {h['auprc']:.3f} {ci(h['auprc_ci'])} "
+              f"(fault prevalence {h['prevalence']:.3f})"
               f"   TPR at FPR <= 5% {h['tpr_at_fpr5']:.3f}")
         print(f"  mean error healthy / fault {h['mean_neg']:.4f} / {h['mean_pos']:.4f}   "
               f"flag-everything F1 {h['trivial_f1']:.4f}")
@@ -278,6 +283,11 @@ def main():
               ("16 global stats, LR (5-fold CV)", lr_s, lr_y)]
     print(fig_roc_vs_baselines(curves, FIGS / "fig_roc_vs_trivial_baselines.png",
                                title=f"PV specialist: {len(D.neg)} healthy vs {len(D.fu)} unique faults")
+          .relative_to(ROOT).as_posix())
+    pr = [(f"Original, {len(D.pos):,} fault files", *from_groups(D.neg, D.pos)),
+          (f"Deduplicated, {len(D.fu)} distinct faults", *from_groups(D.neg, D.fu))]
+    print(fig_pr_curves(pr, FIGS / "fig_pr_original_vs_dedup.png",
+                        title=f"PV specialist, autoencoder error ({len(D.neg)} healthy)")
           .relative_to(ROOT).as_posix())
 
 
