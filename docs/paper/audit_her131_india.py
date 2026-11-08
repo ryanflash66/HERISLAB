@@ -47,6 +47,10 @@ OUT = RESULTS / "her-131"
 CACHE = OUT / "frames.npz"
 PREVIEW = PREPROCESSED / "india_preview"
 UNVERIFIED_CELSIUS = "FLIR Vue Pro"     # camera whose temperatures preprocess_india_temp.py leaves out
+# The paper's distinct-fault count (decided on HER-131, Nov 7): the very next shot, the adjacent-frame
+# definition the PV leakage check uses (check_temporal_leakage, within=1). Gaps 2 and 5 are the
+# sensitivity row; the paper states the range. Grouping uses capture order only, not the hot spot itself.
+HEADLINE_GAP = 1
 
 
 def manifest():
@@ -207,8 +211,13 @@ def dup_block(d, n_disk, n_folders, unreadable):
     for g, r in d.items():
         bs = r["by_split"]
         cell = lambda s: f"{bs[s][0]} -> {bs[s][1]}" if s in bs else "0"  # noqa: E731
-        md.append(f"| {g} shot{'s' if g > 1 else ''} | {r['boxed']} | {r['distinct']} | {r['boxed'] / r['distinct']:.2f} | "
+        lab = f"{g} shot{'s' if g > 1 else ''}" + (" (headline)" if g == HEADLINE_GAP else "")
+        md.append(f"| {lab} | {r['boxed']} | {r['distinct']} | {r['boxed'] / r['distinct']:.2f} | "
                   f"{r['largest']} | {cell('val')} | {cell('test')} | {cell('train_faulty_unused')} |")
+    lo, hi = min(r["distinct"] for r in d.values()), max(r["distinct"] for r in d.values())
+    md += ["", f"Headline: {d[HEADLINE_GAP]['distinct']} distinct faults ({HEADLINE_GAP}-shot rule); range over the "
+               f"settings {lo} to {hi}. Limitation: grouping uses capture order only and does not check that the "
+               "grouped frames show the same module."]
     md += ["", "group sizes (frames: groups): " + "; ".join(
         f"gap {g}: " + ", ".join(f"{k}: {v}" for k, v in r["sizes"].items()) for g, r in d.items()), ""]
     return md
