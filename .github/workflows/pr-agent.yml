@@ -9,21 +9,23 @@ on:
   issue_comment:
     types: [created]
 
-concurrency:
-  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: false
-
 jobs:
   pr_agent:
     # This repo is public, so only the owner can start a paid run from a
-    # comment (e.g. "/review"), and bots and draft PRs never start one.
+    # comment (e.g. "/review"), and bots, drafts and fork PRs (which get no
+    # secrets) never start one.
     if: >-
       github.event.sender.type != 'Bot' && (
-        (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+        (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+         github.event.pull_request.head.repo.full_name == github.repository) ||
         (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
          github.event.comment.author_association == 'OWNER' &&
          startsWith(github.event.comment.body, '/'))
       )
+    # Job-level so skipped runs (ordinary comments) never displace a queued review.
+    concurrency:
+      group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
