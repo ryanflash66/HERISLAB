@@ -186,7 +186,8 @@ def main():
           f"section 5 uses; HER-97 replaces this with a tau frozen on a validation half)")
     rt = check_headline(D.neg, D.fu, pv_thr, seed=SEED)["retuned_threshold"]
     iv_rt = check_unique_intervals(D.neg, D.fu, thr=rt, seed=SEED)
-    print(f"  at the tau re-selected on the deduplicated set ({rt:.6f}, held fixed across resamples): " +
+    print(f"  TEST-TUNED upper bound, not a held-out result: tau {rt:.6f} is the best-F1 threshold on these same "
+          f"892 + 140 scores, held fixed across resamples, so the intervals leave out the variance of choosing it: " +
           "   ".join(f"{k} {iv_rt[k][0]:.4f} [{iv_rt[k][1]:.4f}, {iv_rt[k][2]:.4f}]" for k in ("precision", "recall", "f1")))
     seed_runs = sorted((RESULTS / "her-120").glob("pv_seed*_normal_errors.npy"),
                        key=lambda q: int(q.name[len("pv_seed"):].split("_")[0]))
