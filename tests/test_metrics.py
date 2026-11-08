@@ -131,3 +131,21 @@ def test_paired_delta_sign():
     delta, lo, hi = M.paired_delta_ci(s, better, y, n_boot=200, seed=0)
     assert delta == pytest.approx(M.auroc(better, y) - M.auroc(s, y))
     assert delta > 0 and lo > 0
+
+
+def test_roc_points_and_tpr_at_fpr():
+    s = np.array([0.1, 0.2, 0.3, 0.4, 0.35, 0.8, 0.9])
+    y = np.array([0, 0, 0, 0, 1, 1, 1])
+    fpr, tpr = M.roc_points(s, y)
+    assert (fpr[0], tpr[0]) == (0.0, 0.0) and (fpr[-1], tpr[-1]) == (1.0, 1.0)
+    assert np.all(np.diff(fpr) >= 0) and np.all(np.diff(tpr) >= 0)
+    assert M.tpr_at_fpr(s, y, 0.0) == pytest.approx(2 / 3)       # 0.8 and 0.9 above every healthy
+    assert M.tpr_at_fpr(s, y, 0.25) == 1.0                       # 0.35 passes with one healthy (0.4) above it
+
+
+def test_average_precision_hand_computed_and_chance_level():
+    s = np.array([0.9, 0.8, 0.7, 0.6])
+    y = np.array([1, 0, 1, 0])
+    assert M.average_precision(s, y) == pytest.approx(0.5 * 1.0 + 0.5 * (2 / 3))
+    assert M.average_precision(np.ones(10), np.r_[np.ones(3), np.zeros(7)].astype(int)) == pytest.approx(0.3)
+    assert M.average_precision([0.1, 0.9], [0, 1]) == 1.0
