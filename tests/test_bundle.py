@@ -107,7 +107,7 @@ def test_golden_pv_bundle_reproduces_saved_errors():
     if not ds.has_split("holdout"):
         pytest.skip("PV holdout array not present")
     b = B.Bundle.load("pv")
-    assert b.threshold == pytest.approx(0.027865, abs=1e-6)
+    assert b.threshold == pytest.approx(0.076174, abs=1e-6)      # chosen on the validation half (HER-97)
     got = b.score_normalized(ds.split("holdout").x[:16])
     want = np.load(RESULTS / "pv_normal_errors.npy")[:16]
     assert np.allclose(got, want, atol=1e-6)

@@ -59,7 +59,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # until hlab is installable
-from hlab.datasets import PV_FAULT_FOLDER, adjacent_frame, pvmd_unique_groups  # noqa: E402
+from hlab.datasets import PV_FAULT_FOLDER, TEST, VAL, adjacent_frame, pixel_hash, pvmd_unique_groups  # noqa: E402
 from hlab.metrics import (auroc, auroc_ci, average_precision, best_f1_threshold, bootstrap_cis,  # noqa: E402
                           confusion, from_groups, roc_points, tpr_at_fpr, trivial_f1)
 from hlab.paths import RAW, RESULTS, ROOT  # noqa: E402
@@ -259,6 +259,31 @@ def check_headline(neg, pos, thr, seed=SEED):
                 mean_neg=float(np.mean(neg)), mean_pos=float(np.mean(pos)))
 
 
+def check_frozen_threshold(neg, pos, neg_role, pos_role, thr):
+    """The alarm threshold as the evaluators now set it (HER-97): chosen on VAL, scored once on TEST.
+
+    neg / pos: healthy and fault scores (one per unique fault for the deduplicated set);
+    neg_role / pos_role: VAL | TEST per score; thr: the evaluator's frozen threshold. Checks that
+    thr is the best-F1 point of the VAL half (so the saved value and the manifest agree), then
+    returns dict(threshold, val, test, test_retuned_threshold, test_retuned, n_val, n_test,
+    test_trivial_f1): confusions at thr on each half, and, for contrast only, the threshold
+    re-tuned on the TEST half and its confusion (the optimistic number the old protocol reported).
+    """
+    neg_role, pos_role = np.asarray(neg_role), np.asarray(pos_role)
+    halves = {r: from_groups(neg[neg_role == r], pos[pos_role == r]) for r in (VAL, TEST)}
+    val_best = best_f1_threshold(*halves[VAL])
+    if not np.isclose(val_best, thr, rtol=1e-9, atol=0):
+        raise RuntimeError(f"saved threshold {thr} is not the best-F1 point of the validation half "
+                           f"({val_best}); rerun the evaluator after build_calibration_split.py")
+    ts, ty = halves[TEST]
+    rt = best_f1_threshold(ts, ty)
+    return dict(threshold=thr, val=confusion(*halves[VAL], thr), test=confusion(ts, ty, thr),
+                test_retuned_threshold=rt, test_retuned=confusion(ts, ty, rt), test_auroc=auroc(ts, ty),
+                test_trivial_f1=trivial_f1(ty),
+                n_val=(int((neg_role == VAL).sum()), int((pos_role == VAL).sum())),
+                n_test=(int((neg_role == TEST).sum()), int((pos_role == TEST).sum())))
+
+
 def check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED):
     """F1 when the threshold is chosen by cross-validation instead of on the whole test set.
 
@@ -446,18 +471,7 @@ def image_formats(paths):
 
 
 # ---------------------------------------------------------------- test-set hashes (HER-105)
-_HASHES = {}
-
-
-def pixel_hash(path):
-    """md5 of a file's decoded pixel array (shape, dtype and bytes), as the loader receives it (EXIF tag ignored)."""
-    key = str(path)
-    if key not in _HASHES:
-        a = np.array(Image.open(path))
-        _HASHES[key] = hashlib.md5(f"{a.shape}{a.dtype}".encode() + a.tobytes()).hexdigest()
-    return _HASHES[key]
-
-
+# pixel_hash lives in hlab.datasets (build_calibration_split.py groups the v2 copies with it).
 def check_test_hashes(test_sets, train_pool):
     """Duplicate, cross-label and training-pool checks over any number of test sets.
 
@@ -701,6 +715,12 @@ class PVInputs:
                                f"and {len(self.gid)} PVMD files")
         self.n_unique = int(self.gid.max()) + 1
         self.fu = unique_fault_scores(self.pos, self.gid)
+        # VAL | TEST (HER-97): per healthy frame, per fault file and per unique fault.
+        self.neg_role = dataset.calibration(self.holdout)
+        self.pos_role = dataset.calibration(self.fault)
+        self.fu_role = np.array([self.pos_role[i] for i in unique_first(self.gid)], dtype=object)
+        if any(len(set(self.pos_role[self.gid == g])) > 1 for g in range(self.n_unique)):
+            raise RuntimeError("copies of one PVMD image sit in different calibration halves")
         self._negF = self._posF_u = None
 
     def features(self):
@@ -846,31 +866,41 @@ def check_unique_intervals(neg, pos_unique, thr=None, n_boot=2000, seed=SEED):
     return bootstrap_cis(*from_groups(neg, pos_unique), stats, n_boot=n_boot, seed=seed)
 
 
-def check_seed_runs(runs, gid, thr=None, spike_ratio=SPIKE_RATIO):
+def check_seed_runs(runs, gid, roles=None, spike_ratio=SPIKE_RATIO):
     """Per-seed training and test numbers of repeated runs, and their spread.
 
     runs: [(label, healthy errors, fault errors per PVMD file, read_training_log dict)], every run
     scored on the same test set. gid: the PVMD pixel groups, so each run is scored on one error per
-    unique fault (unique_fault_scores). thr: a frozen alarm threshold for precision / recall / F1, or
-    None (threshold-free statistics only; a per-run best-F1 threshold would tune on the test set).
+    unique fault (unique_fault_scores). roles: (VAL | TEST per healthy frame, per unique fault), or
+    None. Without roles only the threshold-free statistics are computed, on every image. With roles
+    (HER-97) each run gets its own threshold, the best-F1 point of its VAL half (error scales differ
+    between runs, so one run's threshold does not carry to another), and every statistic, including
+    precision / recall / F1 at that threshold, is computed on the TEST half only.
 
     Returns dict(rows=[{label, best_epoch, best_val_loss, epochs_run, jump, jump_epoch, spike, auroc,
-    auprc, tpr_at_fpr5[, precision, recall, f1]}], summary={stat: (mean, sd, min, max)}, n, n_spike).
-    sd is the sample standard deviation (ddof 1; 0.0 for one run).
+    auprc, tpr_at_fpr5[, threshold, precision, recall, f1]}], summary={stat: (mean, sd, min, max)},
+    n, n_spike). sd is the sample standard deviation (ddof 1; 0.0 for one run).
     """
     stats = threshold_free_stats()
-    if thr is not None:
-        stats.update(threshold_stats(thr))
+    keys = list(stats) + (["threshold", "precision", "recall", "f1"] if roles is not None else [])
     rows = []
     for label, neg, pos, log in runs:
-        s, y = from_groups(neg, unique_fault_scores(pos, gid))
+        fu = unique_fault_scores(pos, gid)
         jump, jump_epoch = val_loss_jump(log["val_loss"])
         row = dict(label=label, best_epoch=log["best_epoch"], best_val_loss=log["best_val_loss"],
                    epochs_run=len(log["val_loss"]), jump=jump, jump_epoch=jump_epoch, spike=jump >= spike_ratio)
+        if roles is None:
+            s, y = from_groups(neg, fu)
+        else:
+            nr, fr = (np.asarray(r) for r in roles)
+            thr = best_f1_threshold(*from_groups(neg[nr == VAL], fu[fr == VAL]))
+            s, y = from_groups(neg[nr == TEST], fu[fr == TEST])
+            row["threshold"] = thr
+            row.update({k: float(f(s, y)) for k, f in threshold_stats(thr).items()})
         row.update({k: float(f(s, y)) for k, f in stats.items()})
         rows.append(row)
     summary = {}
-    for k in ("best_epoch", "best_val_loss", *stats):
+    for k in ("best_epoch", "best_val_loss", *keys):
         v = np.array([r[k] for r in rows], dtype=float)
         summary[k] = (float(v.mean()), float(v.std(ddof=1)) if len(v) > 1 else 0.0, float(v.min()), float(v.max()))
     return dict(rows=rows, summary=summary, n=len(rows), n_spike=sum(r["spike"] for r in rows))
@@ -901,7 +931,7 @@ def fig_error_by_source(neg_om, neg_thm, fault_unique, thr, path):
     for e, lab, c in groups:
         ax.hist(e, bins=bins, weights=np.full(len(e), 1 / len(e)), histtype="step", lw=1.8, color=c, label=lab)
     ax.axvline(thr, ls="--", lw=1.0, color=_COLORS["ink"])
-    ax.text(thr * 0.95, ax.get_ylim()[1] * 0.97, "F1-optimal\nthreshold", ha="right", va="top", fontsize=8,
+    ax.text(thr * 0.95, ax.get_ylim()[1] * 0.97, "threshold set on\nvalidation half", ha="right", va="top", fontsize=8,
             color=_COLORS["ink"])
     ax.set_xscale("log")
     ax.yaxis.grid(True, color=_COLORS["grid"]); ax.set_axisbelow(True)

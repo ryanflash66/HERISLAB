@@ -17,10 +17,17 @@ Sections (one or more check functions each in audit.py; this file picks the inpu
   3. Temporal leakage: held-out PV frames with an adjacent (and a two-away) frame in TRAIN, and the
      frame-correlation sample
   4. Source shortcut: AE error by acquisition source (O&M vs THM), source AUROCs with bootstrap CIs
-  5. Headline metrics (Tables III and IV): AUROC with bootstrap CI, AUPRC, TPR at FPR <= 5%,
-     confusion at the saved and re-tuned thresholds, the cross-validated threshold
+  5. Headline metrics (Tables III and IV): threshold-free AUROC with bootstrap CI, AUPRC and TPR at
+     FPR <= 5% on every image; precision, recall and F1 on the test half at the threshold chosen on
+     the validation half (HER-97), with the test-tuned threshold and the cross-validated one for contrast
   5b. Repeated runs and intervals (HER-120): bootstrap intervals over the 892 healthy frames and the
-     140 unique faults, and the per-seed table of src/experiments/seed_runs_pv.py
+     140 unique faults (threshold statistics over the test half), and the per-seed table of
+     src/experiments/seed_runs_pv.py, each seed with its own validation threshold
+
+Threshold protocol (HER-97): every alarm threshold is the best-F1 point of the validation half of
+docs/data_manifests/{pv,v2}_calibration_split.csv, frozen by the evaluator, and every count that
+depends on it (false positives by source, precision, recall, F1, rule-layer ensemble) is taken
+over the test half only.
   6. Trivial baselines (Table VI): single global statistics and the 16-statistic logistic regression,
      and the HER-107 same-transform table (the trivial baselines under each hlab.transform variant)
   7. Rule layer (Table VII): dT-proxy AUROC, tier distribution and ensemble verdicts via hlab.rules
@@ -37,7 +44,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
-from audit import (PVInputs, SEED, check_cv_threshold, check_seed_runs, check_unique_intervals, check_frame_correlation, check_headline,  # noqa: E402
+from audit import (PVInputs, SEED, check_cv_threshold, check_frozen_threshold, check_seed_runs,  # noqa: E402
+                   check_unique_intervals, check_frame_correlation, check_headline,
                    check_pvmd_duplicates, check_rule_layer, check_source_shortcut, check_temporal_leakage,
                    check_test_hashes, check_transform_baselines, image_formats, check_trivial_baselines, fig_error_by_source,
                    fig_roc_vs_baselines, global_features, logreg_cv_scores, pv_frame_paths, read_training_log,
@@ -61,7 +69,8 @@ def ci(v):
 
 
 def main():
-    # The evaluators' frozen best-F1 thresholds (results/*_eval_metrics.npy), read through the bundles.
+    # The evaluators' thresholds (results/*_eval_metrics.npy), read through the bundles: each is the
+    # best-F1 point of its validation half, frozen (HER-97); check_frozen_threshold re-derives it.
     pv, v2 = Bundle.load("pv"), Bundle.load("v2")
     pv_thr, v2_thr = pv.require_threshold(), v2.require_threshold()
     pvds = Dataset("pv")
@@ -82,7 +91,7 @@ def main():
         print(f"{lab} image formats (PIL mode, size): {fmt}")
     st = pvds.stats
     print(f"normalisation statistics of TRAIN: mean {st['mean']:.2f}  std {st['std']:.2f}")
-    print(f"saved F1-optimal threshold tau: {pv_thr:.6f} ({pv_thr:.2e})")
+    print(f"alarm threshold tau, best F1 on the validation half, frozen: {pv_thr:.6f} ({pv_thr:.2e})")
     log = read_training_log(RESULTS / "training_log_pv.txt")
     print(f"training log: train {log['n_train']}  val {log['n_val']}  parameters {log['parameters']:,}")
     print(f"  lowest val loss {log['best_val_loss']:.4f} at epoch {log['best_epoch']}; largest val loss "
@@ -130,8 +139,14 @@ def main():
     print(f"general model test set as evaluated (test_normal + test_fault): files {t['n_files']}  "
           f"distinct images {t['n_unique']}  in TRAIN pool {t['in_train']}")
 
-    header("3. Temporal leakage in the PV normal split")
     D = PVInputs(pvds, pv, gid=dup["gid"])
+    hv, ht = D.neg_role == "val", D.neg_role == "test"
+    fv, ft = D.fu_role == "val", D.fu_role == "test"
+    print("validation / test halves (docs/data_manifests/pv_calibration_split.csv): "
+          f"healthy {hv.sum()} / {ht.sum()} (THM {(hv & (D.src == 'thm')).sum()} / {(ht & (D.src == 'thm')).sum()})   "
+          f"unique faults {fv.sum()} / {ft.sum()}   fault files {(D.pos_role == 'val').sum()} / {(D.pos_role == 'test').sum()}")
+
+    header("3. Temporal leakage in the PV normal split")
     adj, n_ho = check_temporal_leakage(pvds, D.holdout)
     adj2, _ = check_temporal_leakage(pvds, D.holdout, within=2)
     print(f"held-out normals with an immediately adjacent frame in TRAIN: {adj} / {n_ho}")
@@ -146,45 +161,67 @@ def main():
 
     header("4. Source shortcut (PV specialist)")
     src = check_source_shortcut(D.neg, D.src, D.fu, pv_thr, order=("om", "thm"))
+    src_t = check_source_shortcut(D.neg[ht], D.src[ht], D.fu[ft], pv_thr, order=("om", "thm"))
     cis = source_auroc_cis(D.neg, D.src, D.fu, seed=SEED)
     for s, r in src["rows"].items():
-        print(f"healthy {s:3s}: n={r['n']:4d}  median err {r['median']:.4f}  flagged at thr {r['flagged']}")
-    print(f"false positives at tau: THM {src['fp_thm']}  O&M {src['fp_om']}  "
-          f"THM share {src['fp_thm'] / (src['fp_thm'] + src['fp_om']):.1%}")
-    print(f"unique faults: median err {np.median(D.fu):.4f}  flagged at thr {int((D.fu > pv_thr).sum())} / {len(D.fu)}")
+        print(f"healthy {s:3s}: n={r['n']:4d}  median err {r['median']:.4f}   test half: "
+              f"n={src_t['rows'][s]['n']:4d}  flagged at tau {src_t['rows'][s]['flagged']}")
+    n_fp = src_t["fp_thm"] + src_t["fp_om"]
+    print(f"false positives at tau (test half): THM {src_t['fp_thm']}  O&M {src_t['fp_om']}  "
+          f"THM share {src_t['fp_thm'] / n_fp if n_fp else 0:.1%}")
+    print(f"unique faults: median err {np.median(D.fu):.4f}   test half: flagged at tau "
+          f"{int((D.fu[ft] > pv_thr).sum())} / {int(ft.sum())}")
     print(f"AUROC healthy O&M vs healthy THM : {src['auroc_om_thm']:.3f} {ci(cis['om_thm'])}")
     print(f"AUROC healthy O&M vs unique fault: {src['auroc_om_fault']:.3f} {ci(cis['om_fault'])}")
     print(f"AUROC healthy THM vs unique fault: {src['auroc_thm_fault']:.3f} {ci(cis['thm_fault'])}")
 
     header("5. Headline metrics (Tables III and IV)")
     gn, gf = saved_errors(v2)
-    for name, neg, pos, thr in [("PV, 1000 files", D.neg, D.pos, pv_thr), ("PV, 140 unique", D.neg, D.fu, pv_thr),
-                                ("v2 general (not in the paper, HER-105)", gn, gf, v2_thr)]:
+    v2ds = Dataset("v2")
+    v2_neg_role, v2_pos_role = v2ds.calibration("test_normal"), v2ds.calibration("test_fault")
+    print("tau is the best-F1 point of the validation half, frozen; the confusion is the test half's, once.")
+    print("The PV tau was chosen with one score per unique fault (the 140 unique row is the headline).")
+    for name, neg, pos, nr, pr, thr in [
+            ("PV, 140 unique", D.neg, D.fu, D.neg_role, D.fu_role, pv_thr),
+            ("PV, 1000 files", D.neg, D.pos, D.neg_role, D.pos_role, pv_thr),
+            ("v2 general (not in the paper, HER-105)", gn, gf, v2_neg_role, v2_pos_role, v2_thr)]:
         h = check_headline(neg, pos, thr, seed=SEED)
         print(f"\n{name}: n healthy {len(neg)}  n fault {len(pos)}")
-        print(f"  AUROC {h['auroc']:.4f} {ci(h['ci'])}   AUPRC {h['auprc']:.3f} (fault prevalence {h['prevalence']:.3f})"
-              f"   TPR at FPR <= 5% {h['tpr_at_fpr5']:.3f}")
-        print(f"  mean error healthy / fault {h['mean_neg']:.4f} / {h['mean_pos']:.4f}   "
-              f"flag-everything F1 {h['trivial_f1']:.4f}")
-        print("  at saved threshold :", rounded(h["saved"]))
-        print(f"  re-tuned best-F1 (tau {h['retuned_threshold']:.6f}):", rounded(h["retuned"]))
+        print(f"  every image, threshold-free: AUROC {h['auroc']:.4f} {ci(h['ci'])}   AUPRC {h['auprc']:.3f} "
+              f"(fault prevalence {h['prevalence']:.3f})   TPR at FPR <= 5% {h['tpr_at_fpr5']:.3f}")
+        print(f"  mean error healthy / fault {h['mean_neg']:.4f} / {h['mean_pos']:.4f}")
+        fz = check_frozen_threshold(neg, pos, nr, pr, thr) if name != "PV, 1000 files" else None
+        if fz is None:    # the PV tau came from the unique-fault validation half; here it is only applied
+            t_neg, t_pos = neg[nr == "test"], pos[pr == "test"]
+            s_t, y_t = from_groups(t_neg, t_pos)
+            fz = dict(n_test=(len(t_neg), len(t_pos)), test=audit.confusion(s_t, y_t, thr), test_auroc=auroc(s_t, y_t),
+                      test_trivial_f1=audit.trivial_f1(y_t))
+        else:
+            print(f"  validation half (healthy {fz['n_val'][0]}, fault {fz['n_val'][1]}) at tau {thr:.6f}:",
+                  rounded(fz["val"]))
+        print(f"  TEST HALF (healthy {fz['n_test'][0]}, fault {fz['n_test'][1]}) at tau {thr:.6f}:", rounded(fz["test"]))
+        print(f"    test-half AUROC {fz['test_auroc']:.4f}   test-half flag-everything F1 {fz['test_trivial_f1']:.4f}")
+        if "test_retuned" in fz:
+            print(f"  for contrast, tau re-tuned on the test half ({fz['test_retuned_threshold']:.6f}, optimistic):",
+                  rounded(fz["test_retuned"]))
+            print(f"  for contrast, tau re-tuned on every image ({h['retuned_threshold']:.6f}, the pre-HER-97 protocol):",
+                  rounded(h["retuned"]))
         if name.startswith("PV"):
             cv = check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED)
-            print(f"  cross-validated tau ({cv['k']}-fold x {cv['repeats']}): pooled F1 {cv['f1_mean']:.4f} "
-                  f"[{cv['f1_lo']:.4f}, {cv['f1_hi']:.4f}]   mean per-fold F1 {cv['f1_mean_fold']:.4f}   "
-                  f"change vs F1 at tau {cv['f1_mean'] - h['saved']['f1']:+.4f}")
+            print(f"  cross-validated tau over every image ({cv['k']}-fold x {cv['repeats']}): pooled F1 "
+                  f"{cv['f1_mean']:.4f} [{cv['f1_lo']:.4f}, {cv['f1_hi']:.4f}]   mean per-fold F1 {cv['f1_mean_fold']:.4f}")
 
     header("5b. Repeated runs and intervals on the deduplicated set (HER-120)")
     print(f"95% stratified bootstrap, 2,000 resamples, seed {SEED}: {len(D.neg)} healthy frames and "
           f"{len(D.fu)} unique fault images (one mean error each) resampled, not the {len(D.pos)} files")
-    iv = check_unique_intervals(D.neg, D.fu, thr=pv_thr, seed=SEED)
+    iv = check_unique_intervals(D.neg, D.fu, seed=SEED)
     for k, (p, lo, hi) in iv.items():
+        print(f"  {k:12s} {p:.4f} [{lo:.4f}, {hi:.4f}]   (every image)")
+    iv_t = check_unique_intervals(D.neg[ht], D.fu[ft], thr=pv_thr, seed=SEED)
+    print(f"test half only ({int(ht.sum())} healthy, {int(ft.sum())} unique faults), tau {pv_thr:.6f} from the "
+          f"validation half, held fixed across resamples:")
+    for k, (p, lo, hi) in iv_t.items():
         print(f"  {k:12s} {p:.4f} [{lo:.4f}, {hi:.4f}]")
-    print("  (precision, recall and F1 at the saved test-tuned tau; HER-97 replaces it with a frozen validation tau)")
-    rt = check_headline(D.neg, D.fu, pv_thr, seed=SEED)["retuned_threshold"]
-    iv_rt = check_unique_intervals(D.neg, D.fu, thr=rt, seed=SEED)
-    print(f"  at the tau re-selected on the deduplicated set ({rt:.6f}, held fixed across resamples): " +
-          "   ".join(f"{k} {iv_rt[k][0]:.4f} [{iv_rt[k][1]:.4f}, {iv_rt[k][2]:.4f}]" for k in ("precision", "recall", "f1")))
     seed_runs = sorted((RESULTS / "her-120").glob("pv_seed*_normal_errors.npy"),
                        key=lambda q: int(q.name[len("pv_seed"):].split("_")[0]))
     runs = []
@@ -193,23 +230,26 @@ def main():
         neg_s = np.load(q)
         pos_s = np.load(q.with_name(f"pv_seed{s}_fault_errors.npy"))
         runs.append((f"seed {s}", neg_s, pos_s, read_training_log(RESULTS / "her-120" / f"training_log_pv_seed{s}.txt")))
-    recorded = check_seed_runs([("recorded (paper)", D.neg, D.pos, log)], D.gid)["rows"][0]
+    roles = (D.neg_role, D.fu_role)
+    recorded = check_seed_runs([("recorded (paper)", D.neg, D.pos, log)], D.gid, roles=roles)["rows"][0]
     print(f"\nrepeated training runs: config/training.json 'pv' recipe (lr 1e-3, no clipping, val holdout seed 43), "
-          f"torch seed varied; every run scored on the same {len(D.neg)} healthy frames and {len(D.fu)} unique faults")
+          f"torch seed varied; every run takes its own tau on the validation half and is scored on the same test half "
+          f"({int(ht.sum())} healthy frames, {int(ft.sum())} unique faults)")
     print(f"spike = an epoch whose val loss is at least {audit.SPIKE_RATIO:g}x the lowest val loss before it")
     if runs:
-        sr = check_seed_runs(runs, D.gid)
-        print("| run | best epoch | best val loss | epochs run | largest val-loss jump | spike | AUROC | AUPRC | TPR at FPR <= 5% |")
-        print("|---|---|---|---|---|---|---|---|---|")
+        sr = check_seed_runs(runs, D.gid, roles=roles)
+        print("| run | best epoch | best val loss | epochs run | largest val-loss jump | spike | AUROC | AUPRC | "
+              "TPR at FPR <= 5% | tau (val) | precision | recall | F1 |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for r in [recorded] + sr["rows"]:
             jump = f"{r['jump']:.1f}x at epoch {r['jump_epoch']}" if r["jump_epoch"] else "-"
             print(f"| {r['label']} | {r['best_epoch']} | {r['best_val_loss']:.4f} | {r['epochs_run']} | {jump} | "
-                  f"{'yes' if r['spike'] else 'no'} | {r['auroc']:.4f} | {r['auprc']:.4f} | {r['tpr_at_fpr5']:.4f} |")
-        print(f"\n{sr['n']} seeded runs, {sr['n_spike']} with a spike. mean, SD, range over the seeded runs:")
+                  f"{'yes' if r['spike'] else 'no'} | {r['auroc']:.4f} | {r['auprc']:.4f} | {r['tpr_at_fpr5']:.4f} | "
+                  f"{r['threshold']:.6f} | {r['precision']:.4f} | {r['recall']:.4f} | {r['f1']:.4f} |")
+        print(f"\n{sr['n']} seeded runs, {sr['n_spike']} with a spike. mean, SD, range over the seeded runs (test half):")
         for k, (m, sd, lo, hi) in sr["summary"].items():
-            fmt = "{:.1f}" if k == "best_epoch" else "{:.4f}"
+            fmt = "{:.1f}" if k == "best_epoch" else "{:.6f}" if k == "threshold" else "{:.4f}"
             print(f"  {k:13s} mean {fmt.format(m)}  SD {fmt.format(sd)}  range {fmt.format(lo)} to {fmt.format(hi)}")
-        print("  (precision and recall per seed wait for the frozen validation threshold of HER-97)")
     else:
         print("no seed runs under results/her-120 (src/experiments/seed_runs_pv.py): single-run numbers only")
     print(f"\nsingle-run vs multi-run: every number in sections 0 to 8 except the seed table above comes from the "
@@ -224,7 +264,6 @@ def main():
     print("PV single-statistic AUROC:", {k: round(v, 3) for k, v in base["single"].items()})
     print(f"PV best single statistics {[(k, round(v, 3)) for k, v in base['top']]}")
     print(f"PV 5-fold logistic regression on 16 statistics AUROC {base['logreg']:.3f}")
-    v2ds = Dataset("v2")
     v2n, v2f = v2ds.split("test_normal"), v2ds.split("test_fault")
     b2 = check_trivial_baselines(global_features(v2n.x, v2ds.stats), global_features(v2f.x, v2ds.stats), seed=SEED)
     print(f"v2 general (not in the paper): best single {[(k, round(v, 3)) for k, v in b2['top']]}  "
@@ -246,7 +285,8 @@ def main():
     fault_imgs = denormalize(D.fault.x[first], pvds.stats)
     sig_h, sig_f = rule_signals(config, healthy_imgs, "pv"), rule_signals(config, fault_imgs, "pv")
     print(f"dT proxy alone, healthy vs unique fault: AUROC {auroc(*from_groups(sig_h, sig_f)):.3f}")
-    for name, imgs, e in [("PV healthy", healthy_imgs, D.neg), ("PV unique faults", fault_imgs, D.fu)]:
+    print("test half only (the autoencoder flag uses tau from the validation half)")
+    for name, imgs, e in [("PV healthy", healthy_imgs[ht], D.neg[ht]), ("PV unique faults", fault_imgs[ft], D.fu[ft])]:
         ae = e > pv_thr
         tiers, final, _ = check_rule_layer(config, imgs, "pv", ae)
         n = len(e)
@@ -255,10 +295,10 @@ def main():
         print(f"  rule tiers {tiers}  ({', '.join(f'{k} {v / n:.1%}' for k, v in tiers.items())})")
         print(f"  ensemble {final}  (Normal to Monitor: {moved} = {moved / n:.1%})")
     ceiling = float(config.ambient_c) + float(config.equipment("transformer")["ceiling_over_ambient_c"])
-    for lab, split, e in [("healthy", v2n, gn), ("fault", v2f, gf)]:
-        keep = v2ds.frames(split, source="transformer")
+    for lab, split, e, role in [("healthy", v2n, gn, v2_neg_role), ("fault", v2f, gf, v2_pos_role)]:
+        keep = v2ds.frames(split, source="transformer") & (role == "test")
         _, _, flagged = check_rule_layer(config, denormalize(split.x[keep], v2ds.stats), "transformer", e[keep] > v2_thr)
-        print(f"transformer {lab} (not in the paper): n={int(keep.sum())} AE flags {(e[keep] > v2_thr).sum()}  "
+        print(f"transformer {lab}, test half (not in the paper): n={int(keep.sum())} AE flags {(e[keep] > v2_thr).sum()}  "
               f"top-oil rule (>{ceiling:.0f} C) flags {flagged}")
 
     header("8. Figures")

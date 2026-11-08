@@ -46,12 +46,15 @@ def _pv_dataset(n_ho=8, n_fault=6):
     src = np.array(["om", "om", "om", "om", "om", "om", "thm", "thm"])[:n_ho]
     seq = ["dr", "sr", "dr", "sr", "dr", "sr", "", ""][:n_ho]
     ids = [f"data/raw/om/{s}_{i:03d}.jpg" if src[i] == "om" else f"data/raw/thm/THM_{i:03d}.tif" for i, s in enumerate(seq)]
-    holdout = Split("holdout", frames(n_ho, 0.0), np.zeros(n_ho, int), ids, src, [{"sequence": s} for s in seq])
+    roles = ["val", "test"] * (n_ho // 2) + ["val"] * (n_ho % 2)
+    holdout = Split("holdout", frames(n_ho, 0.0), np.zeros(n_ho, int), ids, src,
+                    [{"sequence": s, "role": r} for s, r in zip(seq, roles)])
     train_ids = ["data/raw/om/dr_001.jpg", "data/raw/om/sr_010.jpg"]    # adjacent to dr_000 and dr_002 only
     train = Split("train", frames(2, 0.0), np.zeros(2, int), train_ids, np.array(["om", "om"]),
                   [{"sequence": "dr"}, {"sequence": "sr"}])
+    fault_roles = ["val", "val", "test", "val", "val", "test"][:n_fault]    # by _inputs' gid: groups 0, 2 val; 1, 3 test
     fault = Split("fault", frames(n_fault, 1.5), np.ones(n_fault, int), [f"pvmd/F{i}.jpg" for i in range(n_fault)],
-                  np.array(["pvmd"] * n_fault), [{}] * n_fault)
+                  np.array(["pvmd"] * n_fault), [{"role": r} for r in fault_roles])
     return InMemoryDataset("pv", {"train": train, "holdout": holdout, "fault": fault}, stats={"mean": 0.0, "std": 1.0})
 
 
@@ -70,8 +73,26 @@ def test_pv_inputs_builds_unique_scores_and_source_labels():
     negF, posF_u = D.features()
     assert negF.shape == (8, 16) and posF_u.shape == (4, 16)
     assert D.features()[0] is negF                      # computed once
+    assert list(D.neg_role) == ["val", "test"] * 4
+    assert list(D.fu_role) == ["val", "test", "val", "test"]
     with pytest.raises(RuntimeError, match="saved errors do not match"):
         audit.PVInputs(_pv_dataset(), FakeBundle(1.0, lambda x: x), gid=np.zeros(6, int), errors=(np.zeros(3), np.zeros(6)))
+    with pytest.raises(RuntimeError, match="different calibration halves"):
+        audit.PVInputs(_pv_dataset(), FakeBundle(1.0, lambda x: x), gid=np.zeros(6, int), errors=(np.zeros(8), np.zeros(6)))
+
+
+def test_check_frozen_threshold_tunes_on_val_and_scores_test_once():
+    neg = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    pos = np.array([0.9, 0.35, 0.8, 0.45])
+    neg_role = np.array(["val", "test"] * 3)
+    pos_role = np.array(["val", "test", "val", "test"])
+    # VAL: healthy 0.1, 0.3, 0.5 vs faults 0.9, 0.8 -> best F1 at 0.5. TEST: healthy 0.2, 0.4, 0.6 vs 0.35, 0.45.
+    r = audit.check_frozen_threshold(neg, pos, neg_role, pos_role, 0.5)
+    assert r["val"]["f1"] == 1.0 and r["n_val"] == (3, 2) and r["n_test"] == (3, 2)
+    assert (r["test"]["tp"], r["test"]["fp"], r["test"]["fn"]) == (0, 1, 2)
+    assert r["test_retuned"]["f1"] > r["test"]["f1"]               # tuning on TEST would look better
+    with pytest.raises(RuntimeError, match="not the best-F1 point"):
+        audit.check_frozen_threshold(neg, pos, neg_role, pos_role, 0.2)
 
 
 # ---------------------------------------------------------------- 2. temporal leakage
@@ -338,7 +359,14 @@ def test_check_seed_runs_scores_unique_faults_and_flags_spikes():
     m, sd, lo, hi = r["summary"]["best_epoch"]
     assert (m, lo, hi) == (7.0, 5.0, 9.0) and sd == pytest.approx(np.std([5, 9], ddof=1))
     assert "precision" not in r["summary"]
-    assert "f1" in audit.check_seed_runs([("a", neg, pos, logs[0])], gid, thr=0.4)["summary"]
+    # With roles each run takes the best-F1 point of its own VAL half and is scored on TEST only.
+    roles = (np.array(["val", "test", "val"]), np.array(["val", "test", "val"]))
+    w = audit.check_seed_runs([("a", neg, pos, logs[0]), ("b", neg, pos * 0.1, logs[1])], gid, roles=roles)
+    a, b = w["rows"]
+    assert a["threshold"] == pytest.approx(0.3) and b["threshold"] == pytest.approx(0.05)
+    assert a["f1"] == 1.0
+    assert b["recall"] == 1.0 and b["precision"] == 0.5           # b, TEST: fault 0.09 and healthy 0.2 both above 0.05
+    assert "f1" in w["summary"] and "threshold" in w["summary"]
 
 
 def test_figures_are_written(tmp_path):
