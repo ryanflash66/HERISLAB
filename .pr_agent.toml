@@ -1,0 +1,37 @@
+# PR-Agent settings for HERISLAB.
+# Read from the default branch (main), so edits here apply after they merge.
+# Models, the API key and token limits live in .github/workflows/pr-agent.yml.
+# To give this repo a stronger model, set config.model there
+# (e.g. "anthropic/claude-opus-5-5", about 2x the cost per review).
+
+[config]
+large_patch_policy = "clip"
+patch_extra_lines_before = 3
+patch_extra_lines_after = 1
+
+[ignore]
+# Data manifests and documents add tokens without reviewable code.
+glob = ["*.csv", "*.pdf", "*.docx", "*.odt", "*.pptx", "*.png", "*.jpg", "data/**"]
+
+[pr_reviewer]
+num_max_findings = 5
+require_tests_review = true
+require_security_review = false
+require_estimate_effort_to_review = false
+require_ticket_analysis_review = false
+extra_instructions = """\
+This is a research codebase: a convolutional autoencoder for thermal anomaly detection.
+Prioritize, in order:
+- train/test leakage (same image, plot or source on both sides of a split)
+- metric or threshold mistakes (AUROC, F1, precision/recall, how thresholds are picked)
+- preprocessing that differs between normal and fault images or between train and eval
+- reproducibility: fixed seeds, configs read from config/, no hard-coded local paths
+- numbers in README or docs/paper that the changed code no longer produces
+Skip style nits.
+"""
+
+[pr_code_suggestions]
+num_code_suggestions_per_chunk = 3
+max_number_of_calls = 2
+suggestions_score_threshold = 6
+focus_only_on_problems = true
