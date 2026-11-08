@@ -232,6 +232,20 @@ def test_check_cv_threshold_is_seeded_and_bounded():
     assert 0.9 < sep["f1_mean"] <= 1.0
 
 
+def test_check_cv_threshold_groups_keep_copies_in_one_fold():
+    rng = np.random.default_rng(4)
+    neg, pos = rng.normal(0, 1, 50), rng.normal(2, 1, 30)
+    # one item per group draws the same folds as no groups at all
+    assert audit.check_cv_threshold(neg, pos, repeats=4, seed=2) ==         audit.check_cv_threshold(neg, pos, repeats=4, seed=2, pos_groups=np.arange(30))
+    gid = np.repeat(np.arange(6), 5)                     # 6 fault images, 5 copies each
+    for f in audit._group_folds(np.random.default_rng(0), np.arange(30), gid, 5):
+        assert set(np.flatnonzero(np.isin(gid, gid[f]))) == set(f)     # whole groups only
+    g = audit.check_cv_threshold(neg, pos, repeats=4, seed=2, pos_groups=gid)
+    assert 0 <= g["f1_lo"] <= g["f1_mean"] <= g["f1_hi"] <= 1
+    with pytest.raises(ValueError, match="fault groups"):
+        audit.check_cv_threshold(neg, pos, pos_groups=np.arange(5))
+
+
 def test_source_auroc_cis_bracket_the_point_estimates():
     D = _inputs(_pv_dataset())
     cis = audit.source_auroc_cis(D.neg, D.src, D.fu, seed=0)

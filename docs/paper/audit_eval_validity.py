@@ -156,8 +156,9 @@ def main():
 
     header("5. Headline metrics (Tables III and IV)")
     gn, gf = saved_errors(v2)
-    for name, neg, pos, thr in [("PV, 1000 files", D.neg, D.pos, pv_thr), ("PV, 140 unique", D.neg, D.fu, pv_thr),
-                                ("v2 general (not in the paper, HER-105)", gn, gf, v2_thr)]:
+    for name, neg, pos, thr, groups in [(f"PV, {len(D.pos)} files", D.neg, D.pos, pv_thr, D.gid),
+                                        (f"PV, {len(D.fu)} unique", D.neg, D.fu, pv_thr, None),
+                                        ("v2 general (not in the paper, HER-105)", gn, gf, v2_thr, None)]:
         h = check_headline(neg, pos, thr, seed=SEED)
         print(f"\n{name}: n healthy {len(neg)}  n fault {len(pos)}")
         print(f"  AUROC {h['auroc']:.4f} {ci(h['ci'])}   AUPRC {h['auprc']:.3f} (fault prevalence {h['prevalence']:.3f})"
@@ -167,8 +168,9 @@ def main():
         print("  at saved threshold :", rounded(h["saved"]))
         print(f"  re-tuned best-F1 (tau {h['retuned_threshold']:.6f}):", rounded(h["retuned"]))
         if name.startswith("PV"):
-            cv = check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED)
-            print(f"  cross-validated tau ({cv['k']}-fold x {cv['repeats']}): pooled F1 {cv['f1_mean']:.4f} "
+            cv = check_cv_threshold(neg, pos, k=5, repeats=200, seed=SEED, pos_groups=groups)
+            by = "folds keep each unique fault's copies together" if groups is not None else "folds by image"
+            print(f"  cross-validated tau ({cv['k']}-fold x {cv['repeats']}, {by}): pooled F1 {cv['f1_mean']:.4f} "
                   f"[{cv['f1_lo']:.4f}, {cv['f1_hi']:.4f}]   mean per-fold F1 {cv['f1_mean_fold']:.4f}   "
                   f"change vs F1 at tau {cv['f1_mean'] - h['saved']['f1']:+.4f}")
 
@@ -177,7 +179,7 @@ def main():
     j = audit.FEAT.index("p1")
     print(f"PV p1 median healthy / unique fault (0-255): {np.median(pvnF[:, j]):.1f} / {np.median(pvfF_u[:, j]):.1f}")
     base = check_trivial_baselines(pvnF, pvfF_u, seed=SEED)
-    print(f"PV (892 healthy vs 140 unique): autoencoder AUROC {auroc(*from_groups(D.neg, D.fu)):.3f}")
+    print(f"PV ({len(D.neg)} healthy vs {len(D.fu)} unique): autoencoder AUROC {auroc(*from_groups(D.neg, D.fu)):.3f}")
     print("PV single-statistic AUROC:", {k: round(v, 3) for k, v in base["single"].items()})
     print(f"PV best single statistics {[(k, round(v, 3)) for k, v in base['top']]}")
     print(f"PV 5-fold logistic regression on 16 statistics AUROC {base['logreg']:.3f}")
@@ -187,9 +189,9 @@ def main():
     print(f"v2 general (not in the paper): best single {[(k, round(v, 3)) for k, v in b2['top']]}  "
           f"logreg {b2['logreg']:.3f}")
 
-    print("\nHER-107: no-model baselines under each transform, applied the same way to both classes "
-          "(raw files of the 892 held-out frames and the 140 unique faults)")
     healthy_paths, fault_paths = pv_frame_paths(pvds, dup["gid"])
+    print("\nHER-107: no-model baselines under each transform, applied the same way to both classes "
+          f"(raw files of the {len(healthy_paths)} held-out frames and the {len(fault_paths)} unique faults)")
     rows = check_transform_baselines(healthy_paths, fault_paths, seed=SEED)
     cols = audit.TRANSFORM_COLS
     print("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols))
