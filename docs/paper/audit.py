@@ -609,6 +609,23 @@ def shot_key(name, taken=""):
     return taken, int(m.group(2) or 0), int(m.group(1))
 
 
+def place_unreadable(order, unreadable):
+    """`order` (readable names in capture order) with every name in `unreadable` given a slot of its own.
+
+    A file without a capture time keeps a place instead of being dropped, so the shots on either side of
+    it never become adjacent. Its slot is an estimate: right after the readable shot with the nearest
+    lower number of the same counter (same copy suffix and number parity, as the two DJI counters in one
+    folder step by 2), or first when there is none. Unreadable names are placed in number order.
+    """
+    out = list(order)
+    num = lambda n: (int(_SHOT.search(n).group(2) or 0), int(_SHOT.search(n).group(1)))  # noqa: E731
+    for u in sorted(unreadable, key=num):
+        cu, nu = num(u)
+        before = [i for i, n in enumerate(out) if num(n)[0] == cu and num(n)[1] % 2 == nu % 2 and num(n)[1] < nu]
+        out.insert(max(before, key=lambda i: num(out[i])[1]) + 1 if before else 0, u)
+    return out
+
+
 def consecutive_groups(positions, gap=1):
     """Groups of positions (sorted) where each member is at most `gap` shots after the previous one."""
     pos = sorted(positions)
@@ -630,6 +647,9 @@ def check_fault_duplicates(boxed, order, split_of, gaps=(1, 2, 5)):
     A group's split is the split of its frames (a flight is in one split only).
     Per gap: distinct groups, group-size counts, largest group, and boxed frames / groups by split.
     """
+    missing = [f"{folder}/{n}" for folder, names in boxed.items() for n in names if n not in set(order[folder])]
+    if missing:
+        raise ValueError(f"{len(missing)} boxed frame(s) missing from the shot order: {', '.join(missing[:5])}")
     out = {}
     for g in gaps:
         sizes, by_split = Counter(), {}

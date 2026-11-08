@@ -376,6 +376,22 @@ def test_shot_order_and_fault_duplicates():
     assert d[1]["by_split"] == {"test": (3, 2)}
 
 
+def test_unreadable_files_keep_a_slot_and_missing_boxed_frames_fail():
+    # two counters: odd shots 1, 3, 7 and even shots 2, 4; DJI_0005 has no capture time
+    order = ["DJI_0001_R.JPG", "DJI_0003_R.JPG", "DJI_0002_R.JPG", "DJI_0007_R.JPG", "DJI_0004_R.JPG"]
+    placed = audit.place_unreadable(order, ["DJI_0005_R.JPG"])
+    assert placed == ["DJI_0001_R.JPG", "DJI_0003_R.JPG", "DJI_0005_R.JPG", "DJI_0002_R.JPG",
+                      "DJI_0007_R.JPG", "DJI_0004_R.JPG"]           # after 0003, its counter's previous shot
+    assert audit.place_unreadable(order, ["DJI_0000_R.JPG"])[0] == "DJI_0000_R.JPG"
+    # the slot keeps 0003 and 0002 from becoming adjacent
+    boxed = {"a": ["DJI_0003_R.JPG", "DJI_0002_R.JPG"]}
+    split_of = {("a", n): "val" for n in boxed["a"]}
+    assert audit.check_fault_duplicates(boxed, {"a": placed}, split_of, gaps=(1,))[1]["distinct"] == 2
+    assert audit.check_fault_duplicates(boxed, {"a": order}, split_of, gaps=(1,))[1]["distinct"] == 1
+    with pytest.raises(ValueError, match="missing from the shot order"):
+        audit.check_fault_duplicates({"a": ["DJI_0009_R.JPG"]}, {"a": order}, {}, gaps=(1,))
+
+
 def test_check_india_baselines_protocols():
     rng = np.random.default_rng(4)
     n = 240

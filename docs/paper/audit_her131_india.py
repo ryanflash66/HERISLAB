@@ -22,10 +22,13 @@ except the 16-statistic logistic regression of the no-model baseline, and nothin
 Usage:
     venv\\Scripts\\python.exe docs\\paper\\audit_her131_india.py [--workers N]
 Writes results/her-131/report.md and boxes.csv (spreads per box); the per-frame pass (features of
-every frame, spreads of every box) is cached in results/her-131/frames.npz and reused when present.
+every frame, spreads of every box) is cached in results/her-131/frames.npz and reused while its
+fingerprint (cache_key: the code it depends on and the seed) still matches; otherwise it is rebuilt.
 """
 import argparse
 import csv
+import hashlib
+import inspect
 import json
 import sys
 import time
@@ -39,6 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402  (puts src/ on sys.path)
 from audit import FEAT, INDIA_READINGS, SEED  # noqa: E402
 
+import hlab.panels  # noqa: E402
+import hlab.rjpg  # noqa: E402
 from hlab.panels import boxes  # noqa: E402
 from hlab.paths import MANIFESTS, PREPROCESSED, RESULTS, ROOT  # noqa: E402
 from hlab.rjpg import raw_to_celsius, read_rjpg  # noqa: E402
@@ -65,6 +70,17 @@ def _frame(job):
     feats = audit.india_frame_features(raw, t)
     return (rel, [feats[k] for k in INDIA_READINGS],
             [audit.box_spread(t, b) for b in fault_boxes], [(i, audit.box_spread(t, b)) for i, b in controls])
+
+
+def cache_key():
+    """Fingerprint of everything the cached frame pass depends on: the code that computes it
+    (this file's _frame and frame_pass, the audit functions they call, hlab.rjpg and hlab.panels),
+    SEED, FEAT and INDIA_READINGS. A cache with another key is rebuilt."""
+    code = [_frame, frame_pass, audit.global_features, audit.celsius_0_255, audit.india_frame_features,
+            audit.box_pixels, audit.box_spread, audit.control_boxes, hlab.rjpg, hlab.panels]
+    text = "\n".join(inspect.getsource(c).replace("\r\n", "\n") for c in code)
+    text += json.dumps([SEED, list(FEAT), list(INDIA_READINGS)])
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def frame_pass(rows, workers):
@@ -106,17 +122,20 @@ def _taken(path):
 
 
 def shot_order(folders):
-    """({folder: [every readable R-JPG name in it, in capture order]}, [files without a capture time]).
+    """({folder: [every R-JPG name in it, in capture order]}, [files without a capture time]).
 
     Capture time, not the file number: a folder can hold two counters (odd and even numbers) shot
-    minutes apart, so DJI_0002 can come 17 minutes after DJI_0003.
+    minutes apart, so DJI_0002 can come 17 minutes after DJI_0003. A file without a capture time keeps
+    an estimated slot (audit.place_unreadable) so its neighbours are not counted as adjacent shots.
     """
     out, unreadable = {}, []
     for d in folders:
         names = [p.name for p in (ROOT / d).iterdir() if audit._SHOT.search(p.name)]
         taken = {n: _taken(ROOT / d / n) for n in names}
-        unreadable += [f"{d}/{n}" for n, v in taken.items() if v is None]
-        out[d] = sorted((n for n in names if taken[n]), key=lambda n: audit.shot_key(n, taken[n]))
+        missing = sorted(n for n, v in taken.items() if v is None)
+        unreadable += [f"{d}/{n}" for n in missing]
+        readable = sorted((n for n in names if taken[n]), key=lambda n: audit.shot_key(n, taken[n]))
+        out[d] = audit.place_unreadable(readable, missing)
     return out, unreadable
 
 
@@ -204,8 +223,9 @@ def check3(rows):
 
 def dup_block(d, n_disk, n_folders, unreadable):
     md = [f"Shot order: every R-JPG on disk in the {n_folders} flight folders that hold a boxed frame "
-          f"({n_disk} frames), sorted by EXIF capture time; {len(unreadable)} file(s) on disk could not be "
-          f"read and are left out ({', '.join(unreadable) or 'none'}).", "",
+          f"({n_disk} frames), sorted by EXIF capture time; {len(unreadable)} file(s) on disk have no readable "
+          f"capture time and keep an estimated slot after the previous shot of their counter, so their "
+          f"neighbours are not joined ({', '.join(unreadable) or 'none'}).", "",
           "| joined when at most | boxed frames | distinct faults | frames per fault | largest group | "
           "val (plot 16) | test (plot 18) | plot 17 (unused) |", "|---|---|---|---|---|---|---|---|"]
     for g, r in d.items():
@@ -226,14 +246,18 @@ def dup_block(d, n_disk, n_folders, unreadable):
 def main(workers):
     OUT.mkdir(parents=True, exist_ok=True)
     rows = manifest()
-    if CACHE.exists():
-        cache = dict(np.load(CACHE, allow_pickle=False))
-        if list(cache["rel"]) != [r["rel_path"] for r in rows]:
-            raise SystemExit(f"{CACHE} does not match the manifest; move it away and rerun")
+    key = cache_key()
+    cache = dict(np.load(CACHE, allow_pickle=False)) if CACHE.exists() else None
+    if cache is not None and list(cache["rel"]) != [r["rel_path"] for r in rows]:
+        raise SystemExit(f"{CACHE} does not match the manifest; move it away and rerun")
+    if cache is not None and str(cache.get("key", "")) == key:
         print(f"using cached frame pass {CACHE}")
     else:
+        if cache is not None:
+            print(f"{CACHE} was built by other code or settings; rebuilding")
         print(f"frame pass over {len(rows)} frames with {workers} workers")
         cache = frame_pass(rows, workers)
+        cache["key"] = np.array(key)
         np.savez(CACHE, **cache)
     india_n = sum(r["source"] == "india" for r in rows)
     md = ["# HER-131 India audit (no model)", "",
