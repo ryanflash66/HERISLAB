@@ -170,6 +170,39 @@ def average_precision(scores, labels):
     return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
 
 
+def pr_points(scores, labels):
+    """(recall, precision) of ``score >= t`` over every distinct score, recall decreasing, ending at (0, 1).
+
+    Drawn as a ``steps-post`` line this is the curve whose area ``average_precision`` sums: for recall in
+    (R_k-1, R_k] the precision is P_k.
+    """
+    s, y = _check(scores, labels)
+    n_pos = int(y.sum())
+    if n_pos == 0:
+        raise ValueError("pr_points needs at least one fault")
+    cands = np.unique(s)[::-1]
+    pos = np.sort(s[y == 1])
+    neg = np.sort(s[y == 0])
+    tp = len(pos) - np.searchsorted(pos, cands, side="left")      # score >= t
+    fp = len(neg) - np.searchsorted(neg, cands, side="left")
+    recall = np.r_[(tp / n_pos)[::-1], 0.0]
+    precision = np.r_[(tp / (tp + fp))[::-1], 1.0]
+    return recall, precision
+
+
+def average_precision_ci(scores, labels, n_boot=2000, seed=0):
+    """95% bootstrap interval for ``average_precision``: (lo, hi), resampled as ``auroc_ci`` is
+    (healthy and fault separately, with replacement, ``np.random.default_rng(seed)``)."""
+    s, y = _check(scores, labels)
+    rng = np.random.default_rng(seed)
+    vals = np.empty(n_boot)
+    for b in range(n_boot):
+        idx = _stratified_indices(y, rng)
+        vals[b] = average_precision(s[idx], y[idx])
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return float(lo), float(hi)
+
+
 def trivial_f1(labels):
     """F1 of flagging every image: 2p / (1 + p) with p the fault prevalence."""
     y = np.asarray(labels).ravel().astype(int)

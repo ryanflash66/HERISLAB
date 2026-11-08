@@ -41,6 +41,7 @@ Scenarios
   single_statistic_table(rows)                  every statistic's AUROC per transform variant, as Markdown
   read_training_log(path)                       the numbers the training script logged
   fig_error_by_source(...), fig_roc_vs_baselines(...)   the paper's Fig. 2 and Fig. 3 (matplotlib, imported on use)
+  fig_pr_curves(curves, path)                   precision-recall curves with each set's chance level (HER-116)
 
 Feature extraction (global_features, FEAT) and the no-model baselines stay
 here: they belong to the audit, not to a detector. Seeds are arguments
@@ -59,8 +60,8 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # until hlab is installable
 from hlab.datasets import PV_FAULT_FOLDER, adjacent_frame, pvmd_unique_groups  # noqa: E402
-from hlab.metrics import (auroc, auroc_ci, average_precision, best_f1_threshold, confusion, from_groups,  # noqa: E402
-                          roc_points, tpr_at_fpr, trivial_f1)
+from hlab.metrics import (auroc, auroc_ci, average_precision, average_precision_ci,  # noqa: E402
+                          best_f1_threshold, confusion, from_groups, pr_points, roc_points, tpr_at_fpr, trivial_f1)
 from hlab.paths import RAW, RESULTS, ROOT  # noqa: E402
 from hlab.rules import combine, evaluate  # noqa: E402
 from hlab.transform import CELSIUS_RANGE, denormalize, load_gray, to_model_input  # noqa: E402
@@ -243,18 +244,24 @@ def check_source_shortcut(neg, src, pos_unique, thr, order=("om", "thm")):
 
 
 # ---------------------------------------------------------------- 4/5. headline and baselines
+AUPRC_DEF = ("average precision: the sum over distinct score thresholds t (flag when score >= t; tied scores "
+             "enter together) of (recall step) x precision; chance level is the fault prevalence")
+
+
 def check_headline(neg, pos, thr, seed=SEED):
     """AUROC with bootstrap 95% CI, trivial flag-everything F1, confusion at the saved and re-tuned thresholds.
 
-    Also the threshold-free AUPRC (hlab.metrics.average_precision) with the fault prevalence
-    (its chance level), the TPR at FPR <= 5% (hlab.metrics.tpr_at_fpr) and the mean score per class.
+    Also the threshold-free AUPRC (hlab.metrics.average_precision, defined in AUPRC_DEF) with its
+    bootstrap 95% CI (hlab.metrics.average_precision_ci, resampled like the AUROC CI) and the fault
+    prevalence (its chance level), the TPR at FPR <= 5% (hlab.metrics.tpr_at_fpr) and the mean score per class.
     """
     s, y = from_groups(neg, pos)
     lo, hi = auroc_ci(s, y, seed=seed)
     retuned_thr = best_f1_threshold(s, y)
     return dict(auroc=auroc(s, y), ci=(lo, hi), trivial_f1=trivial_f1(y), saved=confusion(s, y, thr),
                 retuned_threshold=retuned_thr, retuned=confusion(s, y, retuned_thr),
-                auprc=average_precision(s, y), prevalence=float(y.mean()), tpr_at_fpr5=tpr_at_fpr(s, y, 0.05),
+                auprc=average_precision(s, y), auprc_ci=average_precision_ci(s, y, seed=seed),
+                prevalence=float(y.mean()), tpr_at_fpr5=tpr_at_fpr(s, y, 0.05),
                 mean_neg=float(np.mean(neg)), mean_pos=float(np.mean(pos)))
 
 
@@ -892,6 +899,33 @@ def fig_roc_vs_baselines(curves, path, title=None):
     if title:
         ax.set_title(title, fontsize=9)
     ax.legend(frameon=False, fontsize=7, loc="lower right", title="AUROC in parentheses", title_fontsize=7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+    return path
+
+
+def fig_pr_curves(curves, path, title=None):
+    """Precision-recall curves on one set of axes; `curves` is [(label, scores, labels), ...]. Each legend entry
+    carries its AUPRC and each curve's chance level (its fault prevalence) is a dashed line in the same colour."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _figure_style(plt)
+    fig, ax = plt.subplots(figsize=(3.6, 3.3))
+    for (lab, s, y), c in zip(curves, (_COLORS["om"], _COLORS["fault"], _COLORS["thm"])):
+        rec, prec = pr_points(s, y)
+        prev = float(np.mean(y))
+        ax.plot(rec, prec, drawstyle="steps-post", lw=1.8, color=c, label=f"{lab} ({average_precision(s, y):.3f})")
+        ax.axhline(prev, ls="--", lw=0.9, color=c)
+        ax.text(0.02, prev + 0.012, f"chance {prev:.3f}", fontsize=7, color=c, va="bottom")
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1.005)
+    ax.grid(True, color=_COLORS["grid"]); ax.set_axisbelow(True)
+    ax.set_xlabel("Recall (fault)"); ax.set_ylabel("Precision")
+    if title:
+        ax.set_title(title, fontsize=9)
+    ax.legend(frameon=False, fontsize=7, loc="lower left", bbox_to_anchor=(0.0, 0.18),
+              title="AUPRC in parentheses", title_fontsize=7)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
