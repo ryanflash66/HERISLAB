@@ -299,7 +299,46 @@ def test_read_training_log(tmp_path):
                  "Early stopping at epoch 3 (no improvement)\nTraining complete in 1.5 min\n", encoding="utf-8")
     log = audit.read_training_log(p)
     assert log == dict(n_train=70, n_val=8, parameters=2352353, best_epoch=2, best_val_loss=0.10, spike_epoch=3,
-                       spike_val_loss=1.20, stop_epoch=3, minutes=1.5)
+                       spike_val_loss=1.20, stop_epoch=3, minutes=1.5, val_loss=[0.30, 0.10, 1.20])
+
+
+# ---------------------------------------------------------------- repeated runs and intervals (HER-120)
+def test_val_loss_jump_is_against_the_lowest_loss_so_far():
+    assert audit.val_loss_jump([0.3, 0.1, 1.2, 0.05]) == (pytest.approx(12.0), 3)
+    ratio, epoch = audit.val_loss_jump([0.3, 0.2, 0.1])         # monotone: the largest ratio is below 1
+    assert ratio < 1 and epoch == 2
+    assert audit.val_loss_jump([0.3]) == (0.0, None)
+
+
+def test_check_unique_intervals_bracket_points_and_match_check_headline():
+    rng = np.random.default_rng(0)
+    neg, fu = rng.normal(0, 1, 80), rng.normal(1.5, 1, 20)
+    iv = audit.check_unique_intervals(neg, fu, n_boot=300, seed=0)
+    assert set(iv) == {"auroc", "auprc", "tpr_at_fpr5"}
+    for p, lo, hi in iv.values():
+        assert lo <= p <= hi
+    h = audit.check_headline(neg, fu, 0.5, seed=0)
+    full = audit.check_unique_intervals(neg, fu, thr=0.5, seed=0)
+    assert full["auroc"][1:] == pytest.approx(h["ci"])            # same draws as auroc_ci
+    assert full["recall"][0] == pytest.approx(h["saved"]["recall"])
+    assert full["precision"][0] == pytest.approx(h["saved"]["precision"])
+
+
+def test_check_seed_runs_scores_unique_faults_and_flags_spikes():
+    gid = np.array([0, 0, 1, 2])                                   # four files, three unique faults
+    neg = np.array([0.1, 0.2, 0.3])
+    pos = np.array([0.0, 1.0, 0.9, 0.8])                          # group 0 mean 0.5
+    logs = [dict(best_epoch=5, best_val_loss=0.017, val_loss=[0.05, 0.017, 1.04]),
+            dict(best_epoch=9, best_val_loss=0.012, val_loss=[0.05, 0.03, 0.012])]
+    r = audit.check_seed_runs([("a", neg, pos, logs[0]), ("b", neg, pos * 0.1, logs[1])], gid)
+    a, b = r["rows"]
+    assert a["auroc"] == pytest.approx(1.0) and a["spike"] and a["jump_epoch"] == 3
+    assert not b["spike"] and b["epochs_run"] == 3
+    assert r["n"] == 2 and r["n_spike"] == 1
+    m, sd, lo, hi = r["summary"]["best_epoch"]
+    assert (m, lo, hi) == (7.0, 5.0, 9.0) and sd == pytest.approx(np.std([5, 9], ddof=1))
+    assert "precision" not in r["summary"]
+    assert "f1" in audit.check_seed_runs([("a", neg, pos, logs[0])], gid, thr=0.4)["summary"]
 
 
 def test_figures_are_written(tmp_path):

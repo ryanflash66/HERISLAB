@@ -20,6 +20,8 @@ Checks
   check_headline(neg, pos, thr, seed)           AUROC with bootstrap CI, AUPRC, TPR at FPR <= 5%, confusion at the saved and
                                                 re-tuned thresholds, trivial F1
   check_cv_threshold(neg, pos, k, repeats)      F1 with the threshold chosen by repeated k-fold cross-validation
+  check_unique_intervals(neg, fu, thr)          bootstrap intervals on the deduplicated set, unique fault image as the unit (HER-120)
+  check_seed_runs(runs, gid, thr)               per-seed best epoch, val-loss spike and test metrics of repeated runs, and their spread
   check_trivial_baselines(negF, posF, seed)     single global statistics and the 16-statistic logistic regression (no model)
   check_transform_baselines(healthy, faults)    the trivial baselines per hlab.transform variant, from the raw files (HER-107)
   check_stored_baselines(dataset, gid)          the trivial baselines on a PV dataset's stored arrays (pv/, pv_matched/)
@@ -58,8 +60,8 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # until hlab is installable
 from hlab.datasets import PV_FAULT_FOLDER, adjacent_frame, pvmd_unique_groups  # noqa: E402
-from hlab.metrics import (auroc, auroc_ci, average_precision, best_f1_threshold, confusion, from_groups,  # noqa: E402
-                          roc_points, tpr_at_fpr, trivial_f1)
+from hlab.metrics import (auroc, auroc_ci, average_precision, best_f1_threshold, bootstrap_cis,  # noqa: E402
+                          confusion, from_groups, roc_points, tpr_at_fpr, trivial_f1)
 from hlab.paths import RAW, RESULTS, ROOT  # noqa: E402
 from hlab.rules import combine, evaluate  # noqa: E402
 from hlab.transform import CELSIUS_RANGE, denormalize, load_gray, to_model_input  # noqa: E402
@@ -799,7 +801,79 @@ def read_training_log(path):
     return dict(n_train=int(num(r"Train:\s+(\d+)")), n_val=int(num(r"Val:\s+(\d+)")),
                 parameters=int(num(r"Parameters: ([\d,]+)").replace(",", "")),
                 best_epoch=best[0], best_val_loss=best[2], spike_epoch=worst[0], spike_val_loss=worst[2],
-                stop_epoch=int(stop.group(1)) if stop else None, minutes=float(num(r"complete in ([\d.]+) min")))
+                stop_epoch=int(stop.group(1)) if stop else None, minutes=float(num(r"complete in ([\d.]+) min")),
+                val_loss=[v for _e, _t, v in epochs])
+
+
+# ---------------------------------------------------------------- repeated runs and intervals (HER-120)
+SPIKE_RATIO = 2.0               # a val-loss spike: an epoch at least this many times the lowest val loss before it
+
+
+def val_loss_jump(val_loss):
+    """(largest ratio of an epoch's val loss to the lowest val loss before it, the epoch it happens at), 1-based.
+
+    (0.0, None) for fewer than two epochs. The recorded PV run's epoch-6 spike is 1.04 / 0.0170, about 61x.
+    """
+    v = np.asarray(val_loss, dtype=float)
+    if len(v) < 2:
+        return 0.0, None
+    ratio = v[1:] / np.minimum.accumulate(v)[:-1]
+    i = int(np.argmax(ratio))
+    return float(ratio[i]), i + 2
+
+
+def threshold_free_stats():
+    """The statistics that need no alarm threshold: AUROC, AUPRC, TPR at FPR <= 5%."""
+    return {"auroc": auroc, "auprc": average_precision, "tpr_at_fpr5": lambda s, y: tpr_at_fpr(s, y, 0.05)}
+
+
+def threshold_stats(thr):
+    """Precision, recall and F1 at score > thr."""
+    return {k: (lambda s, y, k=k: confusion(s, y, thr)[k]) for k in ("precision", "recall", "f1")}
+
+
+def check_unique_intervals(neg, pos_unique, thr=None, n_boot=2000, seed=SEED):
+    """95% bootstrap intervals on the deduplicated set: healthy frames and one score per unique fault.
+
+    Resampling is stratified, with the unique fault image (not the PVMD file) as the fault unit, so
+    the fault side of every interval rests on the 140 distinct images. Always AUROC, AUPRC and TPR at
+    FPR <= 5%; precision, recall and F1 too when a threshold is given. {name: (point, lo, hi)}.
+    The AUROC interval is the one check_headline reports for the same inputs and seed.
+    """
+    stats = threshold_free_stats()
+    if thr is not None:
+        stats.update(threshold_stats(thr))
+    return bootstrap_cis(*from_groups(neg, pos_unique), stats, n_boot=n_boot, seed=seed)
+
+
+def check_seed_runs(runs, gid, thr=None, spike_ratio=SPIKE_RATIO):
+    """Per-seed training and test numbers of repeated runs, and their spread.
+
+    runs: [(label, healthy errors, fault errors per PVMD file, read_training_log dict)], every run
+    scored on the same test set. gid: the PVMD pixel groups, so each run is scored on one error per
+    unique fault (unique_fault_scores). thr: a frozen alarm threshold for precision / recall / F1, or
+    None (threshold-free statistics only; a per-run best-F1 threshold would tune on the test set).
+
+    Returns dict(rows=[{label, best_epoch, best_val_loss, epochs_run, jump, jump_epoch, spike, auroc,
+    auprc, tpr_at_fpr5[, precision, recall, f1]}], summary={stat: (mean, sd, min, max)}, n, n_spike).
+    sd is the sample standard deviation (ddof 1; 0.0 for one run).
+    """
+    stats = threshold_free_stats()
+    if thr is not None:
+        stats.update(threshold_stats(thr))
+    rows = []
+    for label, neg, pos, log in runs:
+        s, y = from_groups(neg, unique_fault_scores(pos, gid))
+        jump, jump_epoch = val_loss_jump(log["val_loss"])
+        row = dict(label=label, best_epoch=log["best_epoch"], best_val_loss=log["best_val_loss"],
+                   epochs_run=len(log["val_loss"]), jump=jump, jump_epoch=jump_epoch, spike=jump >= spike_ratio)
+        row.update({k: float(f(s, y)) for k, f in stats.items()})
+        rows.append(row)
+    summary = {}
+    for k in ("best_epoch", "best_val_loss", *stats):
+        v = np.array([r[k] for r in rows], dtype=float)
+        summary[k] = (float(v.mean()), float(v.std(ddof=1)) if len(v) > 1 else 0.0, float(v.min()), float(v.max()))
+    return dict(rows=rows, summary=summary, n=len(rows), n_spike=sum(r["spike"] for r in rows))
 
 
 # ---------------------------------------------------------------- paper figures
