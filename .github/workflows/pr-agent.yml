@@ -1,8 +1,8 @@
+# PR-Agent review and security check for HERISLAB.
+# The logic, models and cost guards live in ryanflash66/shared-workflows; this file
+# only picks the research security profile and this repo's review focus.
 name: PR Agent review
 
-# Runs Qodo's open-source PR-Agent with your own Anthropic key.
-# Cost guards: no run on every push, drafts skipped, comment commands
-# limited to the repo owner, prompts capped at 32k tokens.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
@@ -10,48 +10,21 @@ on:
     types: [created]
 
 jobs:
-  pr_agent:
-    # This repo is public, so only the owner can start a paid run from a
-    # comment (e.g. "/review"), and bots, drafts and fork PRs (which get no
-    # secrets) never start one.
-    if: >-
-      github.event.sender.type != 'Bot' && (
-        (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
-         github.event.pull_request.head.repo.full_name == github.repository) ||
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
-         github.event.comment.author_association == 'OWNER' &&
-         startsWith(github.event.comment.body, '/'))
-      )
-    # Job-level so skipped runs (ordinary comments) never displace a queued review.
-    concurrency:
-      group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  review:
+    uses: ryanflash66/shared-workflows/.github/workflows/pr-agent.yml@main
     permissions:
       contents: read
       issues: write
       pull-requests: write
-    steps:
-      - name: PR Agent
-        # Pinned release image, not the rolling @main, because this job holds your API key.
-        uses: docker://pragent/pr-agent:0.49.0-github_action
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC.KEY: ${{ secrets.ANTHROPIC_KEY }}
-          # Models: Sonnet for review and code suggestions, Haiku for the PR summary.
-          config.model: "anthropic/claude-sonnet-5-5"
-          config.model_weak: "anthropic/claude-haiku-5-5"
-          config.fallback_models: '["anthropic/claude-sonnet-5"]'
-          # 0.49.0 predates Sonnet 5.5 and Haiku 5.5 in its model table, so give their
-          # window here; max_model_tokens still caps every prompt at 32k tokens.
-          config.custom_model_max_tokens: "1000000"
-          config.max_model_tokens: "32000"
-          config.enable_claude_adaptive_thinking: "false"
-          # What runs automatically when a PR opens or is marked ready.
-          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
-          github_action_config.auto_review: "true"
-          github_action_config.auto_improve: "true"
-          github_action_config.auto_describe: "true"
-          # Post the summary as a comment so your own PR description is never overwritten.
-          pr_description.publish_description_as_comment: "true"
+    secrets:
+      ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+    with:
+      profile: research
+      focus: |
+        This is a research codebase: a convolutional autoencoder for thermal anomaly detection.
+        Prioritize, in order:
+        - train/test leakage (same image, plot or source on both sides of a split)
+        - metric or threshold mistakes (AUROC, F1, precision/recall, how thresholds are picked)
+        - preprocessing that differs between normal and fault images or between train and eval
+        - reproducibility: fixed seeds, configs read from config/, no hard-coded local paths
+        - numbers in README or docs/paper that the changed code no longer produces
